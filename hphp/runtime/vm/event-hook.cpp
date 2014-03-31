@@ -17,12 +17,13 @@
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/ext/ext_function.h"
 #include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/base/thread-info.h"
 
 namespace HPHP {
 
@@ -32,6 +33,10 @@ static StaticString s_exit("exit");
 static StaticString s_exception("exception");
 static StaticString s_name("name");
 static StaticString s_return("return");
+
+// implemented in runtime/ext/ext_hotprofiler.cpp
+extern void begin_profiler_frame(Profiler *p, const char *symbol);
+extern void end_profiler_frame(Profiler *p, const char *symbol);
 
 void EventHook::Enable() {
   ThreadInfo::s_threadInfo->m_reqInjectionData.setEventHookFlag();
@@ -135,6 +140,9 @@ bool EventHook::RunInterceptHandler(ActRec* ar) {
   const Func* func = ar->m_func;
   if (LIKELY(func->maybeIntercepted() == 0)) return true;
 
+  // Intercept only original generator / async function calls, not resumption.
+  if (ar->inGenerator()) return true;
+
   Variant *h = get_intercept_handler(func->fullNameRef(),
                                      &func->maybeIntercepted());
   if (!h) return true;
@@ -227,7 +235,7 @@ bool EventHook::onFunctionEnter(const ActRec* ar, int funcType) {
 }
 
 void EventHook::onFunctionExit(const ActRec* ar) {
-  auto const inlinedRip = JIT::tx64->uniqueStubs.retInlHelper;
+  auto const inlinedRip = JIT::tx->uniqueStubs.retInlHelper;
   if ((JIT::TCA)ar->m_savedRip == inlinedRip) {
     // Inlined calls normally skip the function enter and exit events. If we
     // side exit in an inlined callee, we want to make sure to skip the exit

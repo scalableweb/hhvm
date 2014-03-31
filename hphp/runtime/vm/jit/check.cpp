@@ -105,7 +105,7 @@ bool checkBlock(Block* b) {
   // Invariants #2, #4
   assert(it != end && b->back().isBlockEnd());
   --end;
-  for (DEBUG_ONLY IRInstruction& inst : folly::makeRange(it, end)) {
+  for (DEBUG_ONLY IRInstruction& inst : folly::range(it, end)) {
     assert(inst.op() != DefLabel);
     assert(inst.op() != BeginCatch);
     assert(!inst.isBlockEnd());
@@ -219,8 +219,8 @@ bool checkTmpsSpanningCalls(const IRUnit& unit) {
      * analysis does not scan into the callee stack when searching for a type
      * of value in the caller.
      *
-     * Tmps defined by DefConst are always available and not assigned to
-     * registers.  However, results of LdConst may not span calls.
+     * Tmps defined by DefConst are always available and may be assigned to
+     * registers if needed by the instructions using the const.
      */
     return (inst.is(ReDefSP) && src->isA(Type::StkPtr)) ||
            (inst.is(ReDefGeneratorSP) && src->isA(Type::StkPtr)) ||
@@ -317,17 +317,25 @@ bool checkRegisters(const IRUnit& unit, const RegAllocInfo& regs) {
       auto& inst_regs = regs[inst];
       for (int i = 0, n = inst.numSrcs(); i < n; ++i) {
         auto const &rs = inst_regs.src(i);
-        if (!rs.spilled() &&
-            ((arch() == Arch::X64 && (rs.reg(0) == X64::rVmSp ||
-                                      rs.reg(0) == X64::rVmFp)) ||
-             (arch() == Arch::ARM && (rs.reg(0) == ARM::rVmSp ||
-                                      rs.reg(0) == ARM::rVmFp)))) {
+        if (!rs.spilled()) {
           // hack - ignore rbx and rbp
-          continue;
+          bool ignore_frame_regs;
+
+          switch (arch()) {
+            case Arch::X64:
+              ignore_frame_regs = (rs.reg(0) == X64::rVmSp ||
+                                  rs.reg(0) == X64::rVmFp);
+              break;
+            case Arch::ARM:
+               ignore_frame_regs = (rs.reg(0) == ARM::rVmSp ||
+                                   rs.reg(0) == ARM::rVmFp);
+              break;
+          }
+          if (ignore_frame_regs) continue;
         }
         DEBUG_ONLY auto src = inst.src(i);
         assert(rs.numWords() == src->numWords() ||
-               (src->inst()->op() == DefConst && rs.numWords() == 0));
+               (src->isConst() && rs.numWords() == 0));
         DEBUG_ONLY auto allocated = rs.numAllocated();
         if (allocated == 2) {
           if (rs.spilled()) {

@@ -27,7 +27,7 @@
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/base/file-repository.h"
 #include "hphp/system/systemlib.h"
 #include "hphp/util/logger.h"
@@ -52,9 +52,10 @@ SYSTEMLIB_CLASSES(SYSTEM_CLASS_STRING)
 #undef STRINGIZE_CLASS_NAME
 
 void ProcessInit() {
-  // Create the global tx64 object
-  JIT::g_translator = JIT::tx64 = new JIT::TranslatorX64();
-  JIT::tx64->initUniqueStubs();
+  // Create the global mcg object
+  JIT::mcg = new JIT::MCGenerator();
+  JIT::tx = &JIT::mcg->tx();
+  JIT::mcg->initUniqueStubs();
 
   // Save the current options, and set things up so that
   // systemlib.php can be read from and stored in the
@@ -151,11 +152,6 @@ void ProcessInit() {
   SYSTEMLIB_CLASSES(INIT_SYSTEMLIB_CLASS_FIELD)
 
 #undef INIT_SYSTEMLIB_CLASS_FIELD
-
-  SystemLib::s_continuationSendFunc =
-    SystemLib::s_ContinuationClass->lookupMethod(makeStaticString("send"));
-  SystemLib::s_continuationRaiseFunc =
-    SystemLib::s_ContinuationClass->lookupMethod(makeStaticString("raise"));
 
   // Retrieve all of the class pointers
   for (long long i = 0; i < hhbc_ext_class_count; ++i) {

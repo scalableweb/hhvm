@@ -553,7 +553,7 @@ bool Transport::setCookie(const String& name, const String& value, int64_t expir
     cookie += encoded_value ? encoded_value : "";
     if (expire > 0) {
       if (expire > 253402300799LL) {
-        raise_warning("Expiry date cannot have a year greater then 9999");
+        raise_warning("Expiry date cannot have a year greater than 9999");
         return false;
       }
       cookie += "; expires=";
@@ -657,7 +657,7 @@ void Transport::prepareHeaders(bool compressed, bool chunked,
     if (debug) {
       String decrypted =
         f_openssl_decrypt(encrypted, cipher, key, k_OPENSSL_RAW_DATA, iv);
-      assert(decrypted->same(ip.get()));
+      assert(decrypted.get()->same(ip.get()));
     }
     addHeaderImpl("X-FB-Debug", output.c_str());
   }
@@ -715,7 +715,7 @@ String Transport::prepareResponse(const void *data, int size, bool &compressed,
   return response;
 }
 
-bool Transport::setHeaderCallback(CVarRef callback) {
+bool Transport::setHeaderCallback(const Variant& callback) {
   if (m_headerCallback.toBoolean()) {
     // return false if a callback has already been set.
     return false;

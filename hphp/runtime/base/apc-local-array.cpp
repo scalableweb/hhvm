@@ -13,13 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/base/apc-local-array.h"
+
 #include <vector>
+
 #include "hphp/runtime/base/apc-handle-defs.h"
 #include "hphp/runtime/base/apc-typed-value.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/hphp-array-defs.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/runtime-error.h"
@@ -28,7 +30,7 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-CVarRef APCLocalArray::getValueRef(ssize_t pos) const {
+const Variant& APCLocalArray::getValueRef(ssize_t pos) const {
   APCHandle *sv = m_arr->getValue(pos);
   DataType t = sv->getType();
   if (!IS_REFCOUNTED_TYPE(t)) {
@@ -140,25 +142,25 @@ ArrayData *APCLocalArray::LvalNew(ArrayData* ad, Variant *&ret, bool copy) {
 }
 
 ArrayData*
-APCLocalArray::SetInt(ArrayData* ad, int64_t k, CVarRef v, bool copy) {
+APCLocalArray::SetInt(ArrayData* ad, int64_t k, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->set(k, v, false));
 }
 
 ArrayData*
-APCLocalArray::SetStr(ArrayData* ad, StringData* k, CVarRef v, bool copy) {
+APCLocalArray::SetStr(ArrayData* ad, StringData* k, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->set(k, v, false));
 }
 
 ArrayData*
-APCLocalArray::SetRefInt(ArrayData* ad, int64_t k, CVarRef v, bool copy) {
+APCLocalArray::SetRefInt(ArrayData* ad, int64_t k, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->setRef(k, v, false));
 }
 
 ArrayData*
-APCLocalArray::SetRefStr(ArrayData* ad, StringData* k, CVarRef v, bool copy) {
+APCLocalArray::SetRefStr(ArrayData* ad, StringData* k, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->setRef(k, v, false));
 }
@@ -178,19 +180,19 @@ ArrayData* APCLocalArray::Copy(const ArrayData* ad) {
   return Escalate(ad);
 }
 
-ArrayData *APCLocalArray::Append(ArrayData* ad, CVarRef v, bool copy) {
+ArrayData *APCLocalArray::Append(ArrayData* ad, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->append(v, false));
 }
 
 ArrayData*
-APCLocalArray::AppendRef(ArrayData* ad, CVarRef v, bool copy) {
+APCLocalArray::AppendRef(ArrayData* ad, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->appendRef(v, false));
 }
 
 ArrayData*
-APCLocalArray::AppendWithRef(ArrayData* ad, CVarRef v, bool copy) {
+APCLocalArray::AppendWithRef(ArrayData* ad, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->appendWithRef(v, false));
 }
@@ -205,7 +207,7 @@ ArrayData* APCLocalArray::Merge(ArrayData* ad, const ArrayData *elems) {
   return escalated->merge(elems);
 }
 
-ArrayData *APCLocalArray::Prepend(ArrayData* ad, CVarRef v, bool copy) {
+ArrayData *APCLocalArray::Prepend(ArrayData* ad, const Variant& v, bool copy) {
   ArrayData *escalated = Escalate(ad);
   return releaseIfCopied(escalated, escalated->prepend(v, false));
 }
@@ -273,12 +275,12 @@ ssize_t APCLocalArray::IterRewind(const ArrayData* ad, ssize_t prev) {
   return next >= 0 ? next : invalid_index;
 }
 
-bool APCLocalArray::ValidFullPos(const ArrayData* ad, const FullPos& fp) {
+bool APCLocalArray::ValidMArrayIter(const ArrayData* ad, const MArrayIter& fp) {
   assert(fp.getContainer() == ad);
   return false;
 }
 
-bool APCLocalArray::AdvanceFullPos(ArrayData* ad, FullPos& fp) {
+bool APCLocalArray::AdvanceMArrayIter(ArrayData* ad, MArrayIter& fp) {
   return false;
 }
 

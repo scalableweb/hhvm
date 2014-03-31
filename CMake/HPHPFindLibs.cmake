@@ -17,6 +17,8 @@
 
 include(CheckFunctionExists)
 
+add_definitions("-DHAVE_QUICKLZ")
+
 # libdl
 find_package(LibDL)
 if (LIBDL_INCLUDE_DIRS)
@@ -39,10 +41,6 @@ FIND_PATH(FEATURES_HEADER features.h)
 if (FEATURES_HEADER)
 	add_definitions("-DHAVE_FEATURES_H=1")
 endif()
-
-# magickwand
-find_package(LibMagickWand REQUIRED)
-include_directories(${LIBMAGICKWAND_INCLUDE_DIRS})
 
 # google-glog
 find_package(Glog REQUIRED)
@@ -105,11 +103,6 @@ endif ()
 
 # GD checks
 add_definitions(-DPNG_SKIP_SETJMP_CHECK)
-find_package(LibVpx)
-if (LIBVPX_INCLUDE_DIRS)
-	include_directories(${LIBVPX_INCLUDE_DIRS})
-	add_definitions("-DHAVE_GD_WEBP")
-endif()
 find_package(LibJpeg)
 if (LIBJPEG_INCLUDE_DIRS)
 	include_directories(${LIBJPEG_INCLUDE_DIRS})
@@ -446,7 +439,6 @@ macro(hphp_link target)
 	target_link_libraries(${target} ${LIBEVENT_LIB})
 	target_link_libraries(${target} ${CURL_LIBRARIES})
 	target_link_libraries(${target} ${LIBGLOG_LIBRARY})
-	target_link_libraries(${target} ${LIBMAGICKWAND_LIBRARIES})
 
 if (LibXed_LIBRARY)
 	target_link_libraries(${target} ${LibXed_LIBRARY})
@@ -505,9 +497,6 @@ endif()
 if (LIBPNG_LIBRARIES)
 	target_link_libraries(${target} ${LIBPNG_LIBRARIES})
 endif()
-if (LIBVPX_LIBRARIES)
-	target_link_libraries(${target} ${LIBVPX_LIBRARIES})
-endif()
 if (LIBUODBC_LIBRARIES)
 	target_link_libraries(${target} ${LIBUODBC_LIBRARIES})
 endif()
@@ -547,4 +536,7 @@ endif()
         target_link_libraries(${target} ${LIBDWARF_LIBRARIES})
         target_link_libraries(${target} ${LIBELF_LIBRARIES})
 
+	if (ZEND_COMPAT_LINK_LIBRARIES)
+		target_link_libraries(${target} ${ZEND_COMPAT_LINK_LIBRARIES})
+	endif()
 endmacro()

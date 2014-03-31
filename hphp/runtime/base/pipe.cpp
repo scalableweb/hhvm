@@ -15,7 +15,9 @@
 */
 
 #include "hphp/runtime/base/pipe.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include "hphp/runtime/base/type-string.h"
+
 #include "hphp/util/light-process.h"
 
 namespace HPHP {
@@ -44,6 +46,7 @@ bool Pipe::open(const String& filename, const String& mode) {
 }
 
 bool Pipe::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 

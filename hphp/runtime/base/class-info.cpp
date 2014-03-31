@@ -37,33 +37,6 @@ bool ClassInfo::s_loaded = false;
 ClassInfo *ClassInfo::s_systemFuncs = nullptr;
 ClassInfo::ClassMap ClassInfo::s_class_like;
 
-Array ClassInfo::GetSystemFunctions() {
-  assert(s_loaded);
-
-  Array ret = Array::Create();
-  if (s_systemFuncs) {
-    const MethodVec &methods = s_systemFuncs->getMethodsVec();
-    for (unsigned i = 0; i < methods.size(); i++) {
-      ret.append(methods[i]->name);
-    }
-  }
-  return ret;
-}
-
-Array ClassInfo::GetUserFunctions() {
-  assert(s_loaded);
-
-  Array ret = Array::Create();
-  Array dyn = g_context->getUserFunctionsInfo();
-  if (!dyn.isNull()) {
-    ret.merge(dyn);
-    // De-dup values, then renumber (for aesthetics).
-    ret = ArrayUtil::StringUnique(ret).toArrRef();
-    ret->renumber();
-  }
-  return ret;
-}
-
 const ClassInfo::MethodInfo *ClassInfo::FindSystemFunction(const String& name) {
   assert(!name.isNull());
   assert(s_loaded);
@@ -205,10 +178,10 @@ ClassInfo::ConstantInfo::ConstantInfo() :
     valueLen(0), callback(nullptr), deferred(true) {
 }
 
-CVarRef ClassInfo::ConstantInfo::getDeferredValue() const {
+const Variant& ClassInfo::ConstantInfo::getDeferredValue() const {
   assert(deferred);
   if (callback) {
-    CVarRef (*f)()=(CVarRef(*)())callback;
+    const Variant& (*f)()=(const Variant&(*)())callback;
     return (*f)();
   }
   EnvConstants* g = get_env_constants();
@@ -231,14 +204,14 @@ Variant ClassInfo::ConstantInfo::getValue() const {
   return value;
 }
 
-void ClassInfo::ConstantInfo::setValue(CVarRef value) {
+void ClassInfo::ConstantInfo::setValue(const Variant& value) {
   VariableSerializer vs(VariableSerializer::Type::Serialize);
   String s = vs.serialize(value, true);
   svalue = std::string(s.data(), s.size());
   deferred = false;
 }
 
-void ClassInfo::ConstantInfo::setStaticValue(CVarRef v) {
+void ClassInfo::ConstantInfo::setStaticValue(const Variant& v) {
   value = v;
   value.setEvalScalar();
   deferred = false;
@@ -279,7 +252,7 @@ Variant ClassInfo::UserAttributeInfo::getValue() const {
   return value;
 }
 
-void ClassInfo::UserAttributeInfo::setStaticValue(CVarRef v) {
+void ClassInfo::UserAttributeInfo::setStaticValue(const Variant& v) {
   value = v;
   value.setEvalScalar();
 }
@@ -330,7 +303,7 @@ bool ClassInfo::GetClassMethods(MethodVec &ret, const ClassInfo *classInfo) {
   return true;
 }
 
-void ClassInfo::GetClassSymbolNames(CArrRef names, bool interface, bool trait,
+void ClassInfo::GetClassSymbolNames(const Array& names, bool interface, bool trait,
                                     std::vector<String> &classes,
                                     std::vector<String> *clsMethods,
                                     std::vector<String> *clsProperties,
@@ -420,8 +393,8 @@ void ClassInfo::GetSymbolNames(std::vector<String> &classes,
     constSize = clsConstants->size();
   }
 
-  Array funcs1 = ClassInfo::GetSystemFunctions();
-  Array funcs2 = ClassInfo::GetUserFunctions();
+  Array funcs1 = Unit::getSystemFunctions();
+  Array funcs2 = Unit::getUserFunctions();
   functions.reserve(funcs1.size() + funcs2.size());
   for (ArrayIter iter(funcs1); iter; ++iter) {
     functions.push_back(iter.second().toString());

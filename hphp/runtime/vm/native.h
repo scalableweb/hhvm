@@ -16,9 +16,18 @@
 #ifndef _incl_HPHP_RUNTIME_VM_NATIVE_H
 #define _incl_HPHP_RUNTIME_VM_NATIVE_H
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/base/typed-value.h"
+
 #include "hphp/runtime/vm/func.h"
+
 #include <type_traits>
+
+namespace HPHP {
+struct ActRec;
+struct Class;
+class Object;
+};
 
 /* Macros related to declaring/registering internal implementations
  * of <<__Native>> global functions.
@@ -78,6 +87,7 @@
 #define HHVM_NAMED_FE(fn, fimpl) Native::registerBuiltinFunction(\
                           makeStaticString(#fn), fimpl)
 #define HHVM_FE(fn) HHVM_NAMED_FE(fn, HHVM_FN(fn))
+#define HHVM_FALIAS(fn, falias) HHVM_NAMED_FE(fn, HHVM_FN(falias))
 
 /* Macros related to declaring/registering internal implementations
  * of <<__Native>> class instance methods.
@@ -86,11 +96,11 @@
  * These macros only differ in the following ways:
  * - They accept a classname in addition to the function name
  * - The registered name of the function is "ClassName->FunctionName"
- * - Prototypes include a prepended CObjRef parameter (named this_)
+ * - Prototypes include a prepended const Object& parameter (named this_)
  */
 #define HHVM_MN(cn,fn) c_ ## cn ## _ni_ ## fn
 #define HHVM_METHOD(cn, fn, ...) \
-        HHVM_MN(cn,fn)(CObjRef this_, ##__VA_ARGS__)
+        HHVM_MN(cn,fn)(const Object& this_, ##__VA_ARGS__)
 #define HHVM_NAMED_ME(cn,fn,mimpl) Native::registerBuiltinFunction(\
                           makeStaticString(#cn "->" #fn), \
                           mimpl)
@@ -115,6 +125,28 @@
 
 namespace HPHP { namespace Native {
 //////////////////////////////////////////////////////////////////////////////
+
+// Maximum number of args for a native using double params
+constexpr int kMaxBuiltinArgs = 7;
+
+// Maximum number of args for a native using only int-like params
+constexpr int kMaxBuiltinArgsNoDouble = 15;
+
+// t#3982283 - Our ARM code gen doesn't support stack args yet.
+// In fact, it only supports six of the eight register args.
+// Put a hard limit of five to account for the return register for now.
+constexpr int kMaxFCallBuiltinArgsARM = 5;
+
+inline int maxFCallBuiltinArgs() {
+#ifdef __AARCH64EL__
+  return kMaxFCallBuiltinArgsARM;
+#else
+  if (UNLIKELY(RuntimeOption::EvalSimulateARM)) {
+    return kMaxFCallBuiltinArgsARM;
+  }
+  return kMaxBuiltinArgsNoDouble;
+#endif
+}
 
 enum Attr {
   AttrNone = 0,
@@ -152,7 +184,7 @@ TypedValue* functionWrapper(ActRec* ar);
  * Method version of nativeFunctionWrapper() above.
  *
  * Also prepends a calling context:
- *   CObjRef for instance methods
+ *   const Object& for instance methods
  *   Class* for static methods
  */
 TypedValue* methodWrapper(ActRec* ar);

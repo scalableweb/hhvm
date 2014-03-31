@@ -57,6 +57,7 @@ struct NameValueTableWrapper : public ArrayData {
     : ArrayData(kNvtwKind)
     , m_tab(tab)
   {}
+  ~NameValueTableWrapper();
 
 public: // ArrayData implementation
   static void Release(ArrayData*) {}
@@ -78,7 +79,7 @@ public: // ArrayData implementation
 
   static size_t Vsize(const ArrayData*);
   static void NvGetKey(const ArrayData* ad, TypedValue* out, ssize_t pos);
-  static CVarRef GetValueRef(const ArrayData*, ssize_t pos);
+  static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
 
   static bool ExistsInt(const ArrayData* ad, int64_t k);
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
@@ -91,10 +92,10 @@ public: // ArrayData implementation
                             bool copy);
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
 
-  static ArrayData* SetInt(ArrayData*, int64_t k, CVarRef v, bool copy);
-  static ArrayData* SetStr(ArrayData*, StringData* k, CVarRef v, bool copy);
-  static ArrayData* SetRefInt(ArrayData*, int64_t k, CVarRef v, bool copy);
-  static ArrayData* SetRefStr(ArrayData*, StringData* k, CVarRef v, bool copy);
+  static ArrayData* SetInt(ArrayData*, int64_t k, const Variant& v, bool copy);
+  static ArrayData* SetStr(ArrayData*, StringData* k, const Variant& v, bool copy);
+  static ArrayData* SetRefInt(ArrayData*, int64_t k, const Variant& v, bool copy);
+  static ArrayData* SetRefStr(ArrayData*, StringData* k, const Variant& v, bool copy);
   static ArrayData* RemoveInt(ArrayData*, int64_t k, bool copy);
   static ArrayData* RemoveStr(ArrayData*, const StringData* k, bool copy);
 
@@ -102,30 +103,30 @@ public: // ArrayData implementation
     return const_cast<ArrayData*>(ad);
   }
 
-  static ArrayData* Append(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* AppendRef(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* AppendWithRef(ArrayData*, CVarRef v, bool copy);
+  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* AppendRef(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
 
   static ArrayData* PlusEq(ArrayData*, const ArrayData* elems);
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
-  static ArrayData* Prepend(ArrayData*, CVarRef v, bool copy);
+  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
 
   static ssize_t IterBegin(const ArrayData*);
   static ssize_t IterEnd(const ArrayData*);
   static ssize_t IterAdvance(const ArrayData*, ssize_t prev);
   static ssize_t IterRewind(const ArrayData*, ssize_t prev);
 
-  static bool ValidFullPos(const ArrayData*, const FullPos & fp);
-  static bool AdvanceFullPos(ArrayData*, FullPos&);
+  static bool ValidMArrayIter(const ArrayData*, const MArrayIter & fp);
+  static bool AdvanceMArrayIter(ArrayData*, MArrayIter&);
   static bool IsVectorData(const ArrayData*);
 
   static ArrayData* EscalateForSort(ArrayData*);
   static void Ksort(ArrayData*, int sort_flags, bool ascending);
   static void Sort(ArrayData*, int sort_flags, bool ascending);
   static void Asort(ArrayData*, int sort_flags, bool ascending);
-  static bool Uksort(ArrayData*, CVarRef cmp_function);
-  static bool Usort(ArrayData*, CVarRef cmp_function);
-  static bool Uasort(ArrayData*, CVarRef cmp_function);
+  static bool Uksort(ArrayData*, const Variant& cmp_function);
+  static bool Usort(ArrayData*, const Variant& cmp_function);
+  static bool Uasort(ArrayData*, const Variant& cmp_function);
 
 private:
   static NameValueTableWrapper* asNVTW(ArrayData* ad);

@@ -110,6 +110,7 @@ function find_all_files(string $pattern, string $root_dir,
   foreach ($sit as $fileinfo) {
     if (preg_match($pattern, $fileinfo->getFileName()) === 1 &&
         preg_match($exclude_file_pattern, $fileinfo->getFileName()) === 0 &&
+        strstr($fileinfo->getPath(), '/vendor/') === false &&
         !$exclude_dirs->contains(dirname($fileinfo->getPath()))) {
       $files[] = $fileinfo->getPathName();
     }
@@ -133,6 +134,7 @@ function find_all_files_containing_text(string $text,
   foreach ($sit as $fileinfo) {
     if (strpos(file_get_contents($fileinfo->getPathName()), $text) !== false &&
         preg_match($exclude_file_pattern, $fileinfo->getFileName()) === 0 &&
+        strstr($file_info->getPath(), '/vendor/') === false &&
         !$exclude_dirs->contains(dirname($fileinfo->getPath()))) {
       $files[] = $fileinfo->getPathName();
     }
@@ -196,8 +198,7 @@ function get_subclasses_of(string $parent): Vector {
   return $result;
 }
 
-function get_runtime_build(bool $with_jit = true,
-                           bool $use_php = false): string {
+function get_runtime_build(bool $use_php = false): string {
   $build = "";
 
   // FIX: Should we try to install a vanilla zend binary here instead of
@@ -234,10 +235,7 @@ function get_runtime_build(bool $with_jit = true,
       $repo_args = " -v Repo.Local.Mode=-- -v Repo.Central.Path=".$repo_loc;
       $build .= $repo_args.
         " --config ".__DIR__."/config.hdf".
-        " -v Server.IniFile=".__DIR__."/php.ini";
-    }
-    if ($with_jit) {
-      $build .= " -v Eval.Jit=true";
+        " --config ".__DIR__."/php.ini";
     }
   }
   return $build;

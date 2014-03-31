@@ -53,6 +53,7 @@ public:
   static const char *LineNoFormatWithStar;
   static const char *LocalPrompt;
   static const char *ConfigFileName;
+  static const char *LegacyConfigFileName;
   static const char *HistoryFileName;
   static std::string HomePrefix;
   static std::string SourceRoot;
@@ -114,7 +115,7 @@ public:
   static void AdjustScreenMetrics();
   static bool Match(const char *input, const char *cmd);
   static bool IsValidNumber(const std::string &arg);
-  static String FormatVariable(CVarRef v, int maxlen = 80,
+  static String FormatVariable(const Variant& v, int maxlen = 80,
                                char format = 'd');
   static String FormatInfoVec(const IDebuggable::InfoVec &info,
                               int *nameLen = nullptr);
@@ -267,10 +268,10 @@ public:
    * Stacktraces.
    */
   Array getStackTrace() { return m_stacktrace; }
-  void setStackTrace(CArrRef stacktrace, bool isAsync);
+  void setStackTrace(const Array& stacktrace, bool isAsync);
   bool isStackTraceAsync() { return m_stacktraceAsync; }
   void moveToFrame(int index, bool display = true);
-  void printFrame(int index, CArrRef frame);
+  void printFrame(int index, const Array& frame);
   void setFrame(int frame) { m_frame = frame; }
   int getFrame() const { return m_frame; }
 
@@ -330,11 +331,11 @@ private:
   };
 
   std::string m_configFileName;
-  Hdf m_config;
   int m_tutorial;
   std::set<std::string> m_tutorialVisited;
   bool m_scriptMode; // Is this client being scripted by a test?
   bool m_neverSaveConfig; // So that tests can avoid clobbering the config file
+  bool m_neverSaveConfigOverride;
 
   DECLARE_DBG_CLIENT_SETTING
 
@@ -429,7 +430,7 @@ private:
                       const char *text);
 
   // config and macros
-  void defineColors();
+  void defineColors(const Hdf &config);
   void loadConfig();
   void saveConfig();
   void record(const char *line);
@@ -452,7 +453,7 @@ private:
                                const char *caller);
 
   // Zend executable for CmdZend, overridable via config.
-  std::string m_zendExe;
+  std::string m_zendExe = "php";
 
   bool m_unknownCmd;
 };

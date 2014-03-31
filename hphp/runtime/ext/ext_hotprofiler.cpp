@@ -861,7 +861,7 @@ class TraceWalker {
         Frame fr;
         fr.trace = current;
         fr.level = level - 1;
-        fr.len = symbolLength(current->symbol);
+        fr.len = strlen(current->symbol);
         checkArcBuff(fr.len);
         m_stack.push_back(fr);
       } else if (m_stack.size() > 1) {
@@ -983,17 +983,6 @@ class TraceWalker {
     incStats(m_arcBuff, tIt, callee, stats);
   }
 
-  // Computes the length of the symbol without $continuation on the
-  // end, to ensure that work done in continuations and the original
-  // function are counted together.
-  int symbolLength(const char* symbol) {
-    auto len = strlen(symbol);
-    if ((len > 13) && (strcmp(&symbol[len - 13], "$continuation") == 0)) {
-      return len - 13;
-    }
-    return len;
-  }
-
   vector<std::pair<char*, int>> m_recursion;
   vector<Frame> m_stack;
   int m_arcBuffLen;
@@ -1073,7 +1062,7 @@ class TraceProfiler : public Profiler {
   }
 
   bool ensureTraceSpace() {
-    bool track_realloc = FALSE;
+    bool track_realloc = false;
     if (m_traceBufferFilled) {
       m_overflowCalls++;
       return false;
@@ -1097,7 +1086,7 @@ class TraceProfiler : public Profiler {
                      m_traceBuffer[m_nextTraceEntry++]);
         return false;
       }
-      track_realloc = TRUE;
+      track_realloc = true;
     }
     if (track_realloc) {
       collectStats("(trace buffer realloc)", false,
@@ -1716,7 +1705,7 @@ Variant f_phprof_disable() {
 #endif
 }
 
-void f_fb_setprofile(CVarRef callback) {
+void f_fb_setprofile(const Variant& callback) {
 #ifdef HOTPROFILER
   if (ThreadInfo::s_threadInfo->m_profiler != nullptr) {
     // phpprof is enabled, don't let PHP code override it
@@ -1751,7 +1740,7 @@ void f_xhprof_frame_end() {
 }
 
 void f_xhprof_enable(int flags/* = 0 */,
-                     CArrRef args /* = null_array */) {
+                     const Array& args /* = null_array */) {
 #ifdef HOTPROFILER
 #ifdef CLOCK_THREAD_CPUTIME_ID
   bool missingClockGetTimeNS =

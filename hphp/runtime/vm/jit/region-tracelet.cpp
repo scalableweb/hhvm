@@ -139,6 +139,7 @@ int RegionFormer::inliningDepth() const {
 
 RegionDescPtr RegionFormer::go() {
   uint32_t numJmps = 0;
+
   for (auto const& lt : m_ctx.liveTypes) {
     auto t = lt.type;
     if (t <= Type::Cls) {
@@ -167,7 +168,7 @@ RegionDescPtr RegionFormer::go() {
 
     m_inst.interp = m_interp.count(m_sk);
     auto const doPrediction =
-      m_profiling ? false : outputIsPredicted(m_startSk, m_inst);
+      m_profiling ? false : outputIsPredicted(m_inst);
 
     if (tryInline()) {
       // If m_inst is an FCall and the callee is suitable for inlining, we can
@@ -184,7 +185,8 @@ RegionDescPtr RegionFormer::go() {
       m_arStates.back().pop();
       m_arStates.emplace_back();
       m_curBlock->setInlinedCallee(callee);
-      m_ht.beginInlining(m_inst.imm[0].u_IVA, callee, returnFuncOff);
+      m_ht.beginInlining(m_inst.imm[0].u_IVA, callee, returnFuncOff,
+                         doPrediction ? m_inst.outPred : Type::Gen);
       m_metaHand = Unit::MetaHandle();
 
       m_sk = m_ht.curSrcKey();
@@ -336,7 +338,11 @@ void RegionFormer::addInstruction() {
   if (m_blockFinished) {
     FTRACE(2, "selectTracelet adding new block at {} after:\n{}\n",
            showShort(m_sk), show(*m_curBlock));
-    m_curBlock = m_region->addBlock(curFunc(), m_sk.offset(), 0, curSpOffset());
+    RegionDesc::Block* newCurBlock = m_region->addBlock(curFunc(),
+                                                        m_sk.offset(), 0,
+                                                        curSpOffset());
+    m_region->addArc(m_curBlock->id(), newCurBlock->id());
+    m_curBlock = newCurBlock;
     m_blockFinished = false;
   }
 
@@ -345,7 +351,10 @@ void RegionFormer::addInstruction() {
 }
 
 bool RegionFormer::tryInline() {
-  if (!RuntimeOption::RepoAuthoritative || m_inst.op() != OpFCall) return false;
+  if (!RuntimeOption::RepoAuthoritative ||
+      (m_inst.op() != Op::FCall && m_inst.op() != Op::FCallD)) {
+    return false;
+  }
 
   auto refuse = [this](const std::string& str) {
     FTRACE(2, "selectTracelet not inlining {}: {}\n",
@@ -395,7 +404,7 @@ bool RegionFormer::tryInline() {
         if (sk == m_sk) return false;
 
         auto op = sk.op();
-        if (isFCallStar(op) || op == OpFCallBuiltin) return true;
+        if (isFCallStar(op) || op == Op::FCallBuiltin) return true;
         sk.advance();
       }
     }
@@ -428,7 +437,6 @@ bool RegionFormer::tryInline() {
 
   // Set up the region context, mapping stack slots in the caller to locals in
   // the callee.
-  assert(!callee->isGenerator());
   RegionContext ctx;
   ctx.func = callee;
   ctx.bcOffset = callee->base();
@@ -535,7 +543,7 @@ void RegionFormer::recordDependencies() {
   auto const doRelax = RuntimeOption::EvalHHIRRelaxGuards;
   bool changed = false;
   if (doRelax) {
-    Timer _t("selectTracelet_relaxGuards");
+    Timer _t(Timer::selectTracelet_relaxGuards);
     changed = relaxGuards(unit, *m_ht.irBuilder().guards(), m_profiling);
   }
 
@@ -564,7 +572,7 @@ void RegionFormer::recordDependencies() {
  */
 RegionDescPtr selectTracelet(const RegionContext& ctx, int inlineDepth,
                              bool profiling) {
-  Timer _t("selectTracelet");
+  Timer _t(Timer::selectTracelet);
   InterpSet interp;
   RegionDescPtr region;
   uint32_t tries = 1;
@@ -578,8 +586,8 @@ RegionDescPtr selectTracelet(const RegionContext& ctx, int inlineDepth,
     return RegionDescPtr { nullptr };
   }
 
-  FTRACE(1, "selectTracelet returning after {} tries:\n{}\n",
-         tries, show(*region));
+  FTRACE(1, "selectTracelet returning, inlineDepth {}, {} tries:\n{}\n",
+         inlineDepth, tries, show(*region));
   if (region->blocks.back()->length() == 0) {
     // If the final block is empty because it would've only contained
     // instructions producing literal values, kill it.

@@ -31,11 +31,10 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/base/stats.h"
 
 #include "hphp/runtime/vm/jit/check.h"
-#include "hphp/runtime/vm/jit/code-gen-x64.h"
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/ir.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
@@ -59,9 +58,6 @@ static const bool debug = true;
 #else
 static const bool debug = false;
 #endif
-
-#define TVOFF(nm) offsetof(TypedValue, nm)
-#define AROFF(nm) offsetof(ActRec, nm)
 
 #define HHIR_EMIT(op, ...)                      \
   do {                                          \
@@ -130,7 +126,7 @@ void IRTranslator::assertType(const JIT::Location& l,
 
   switch (l.space) {
     case Location::Stack: {
-      // tx64LocPhysicalOffset returns positive offsets for stack values,
+      // locPhysicalOffset returns positive offsets for stack values,
       // relative to rVmSp
       uint32_t stackOffset = locPhysicalOffset(l);
       m_hhbcTrans.assertTypeStack(stackOffset, Type(rtt));
@@ -176,15 +172,16 @@ IRTranslator::translateDiv(const NormalizedInstruction& i) {
 void
 IRTranslator::translateBinaryArithOp(const NormalizedInstruction& i) {
   switch (i.op()) {
-#define CASE(OpBc) case Op::OpBc: HHIR_EMIT(OpBc);
-    CASE(Add)
-    CASE(Sub)
-    CASE(Mul)
-    CASE(BitAnd)
-    CASE(BitOr)
-    CASE(BitXor)
-#undef CASE
-    default: break;
+  case Op::Add:    HHIR_EMIT(Add);
+  case Op::Sub:    HHIR_EMIT(Sub);
+  case Op::Mul:    HHIR_EMIT(Mul);
+  case Op::AddO:   HHIR_EMIT(AddO);
+  case Op::SubO:   HHIR_EMIT(SubO);
+  case Op::MulO:   HHIR_EMIT(MulO);
+  case Op::BitAnd: HHIR_EMIT(BitAnd);
+  case Op::BitOr:  HHIR_EMIT(BitOr);
+  case Op::BitXor: HHIR_EMIT(BitXor);
+  default: break;
   }
   not_reached();
 }
@@ -506,6 +503,17 @@ IRTranslator::translateAdd(const NormalizedInstruction& i) {
 }
 
 void
+IRTranslator::translateAddO(const NormalizedInstruction& i) {
+  auto leftType = m_hhbcTrans.topType(1);
+  auto rightType = m_hhbcTrans.topType(0);
+  if (leftType <= Type::Arr && rightType <= Type::Arr) {
+    HHIR_EMIT(ArrayAdd);
+  } else {
+    HHIR_EMIT(AddO);
+  }
+}
+
+void
 IRTranslator::translateSqrt(const NormalizedInstruction& i) {
   HHIR_EMIT(Sqrt);
 }
@@ -630,28 +638,23 @@ void IRTranslator::translateDup(const NormalizedInstruction& ni) {
 }
 
 void IRTranslator::translateCreateCont(const NormalizedInstruction& i) {
-  HHIR_EMIT(CreateCont);
+  HHIR_EMIT(CreateCont, i.offset() + i.imm[0].u_BA);
 }
 
 void IRTranslator::translateContEnter(const NormalizedInstruction& i) {
-  auto after = i.nextSk().offset();
-
-  const Func* srcFunc = m_hhbcTrans.curFunc();
-  int32_t callOffsetInUnit = after - srcFunc->base();
-
-  HHIR_EMIT(ContEnter, callOffsetInUnit);
+  HHIR_UNIMPLEMENTED(ContEnter);
 }
 
-void IRTranslator::translateUnpackCont(const NormalizedInstruction& i) {
-  HHIR_EMIT(UnpackCont);
+void IRTranslator::translateContRaise(const NormalizedInstruction& i) {
+  HHIR_UNIMPLEMENTED(ContRaise);
 }
 
 void IRTranslator::translateContSuspend(const NormalizedInstruction& i) {
-  HHIR_EMIT(ContSuspend, i.imm[0].u_IVA);
+  HHIR_EMIT(ContSuspend, i.nextSk().offset());
 }
 
 void IRTranslator::translateContSuspendK(const NormalizedInstruction& i) {
-  HHIR_EMIT(ContSuspendK, i.imm[0].u_IVA);
+  HHIR_EMIT(ContSuspendK, i.nextSk().offset());
 }
 
 void IRTranslator::translateContRetC(const NormalizedInstruction& i) {
@@ -660,10 +663,6 @@ void IRTranslator::translateContRetC(const NormalizedInstruction& i) {
 
 void IRTranslator::translateContCheck(const NormalizedInstruction& i) {
   HHIR_EMIT(ContCheck, i.imm[0].u_IVA);
-}
-
-void IRTranslator::translateContRaise(const NormalizedInstruction& i) {
-  HHIR_EMIT(ContRaise);
 }
 
 void IRTranslator::translateContValid(const NormalizedInstruction& i) {
@@ -687,15 +686,15 @@ void IRTranslator::translateAsyncAwait(const NormalizedInstruction&) {
 }
 
 void IRTranslator::translateAsyncESuspend(const NormalizedInstruction& i) {
-  HHIR_EMIT(AsyncESuspend, i.imm[0].u_IVA, i.imm[1].u_IVA);
+  HHIR_EMIT(AsyncESuspend, i.offset() + i.imm[0].u_BA, i.imm[1].u_IVA);
+}
+
+void IRTranslator::translateAsyncResume(const NormalizedInstruction& i) {
+  HHIR_EMIT(Nop);
 }
 
 void IRTranslator::translateAsyncWrapResult(const NormalizedInstruction& i) {
   HHIR_EMIT(AsyncWrapResult);
-}
-
-void IRTranslator::translateAsyncWrapException(const NormalizedInstruction& i) {
-  HHIR_EMIT(AsyncWrapException);
 }
 
 void IRTranslator::translateStrlen(const NormalizedInstruction& i) {
@@ -788,7 +787,7 @@ void IRTranslator::translateFPassL(const NormalizedInstruction& ni) {
   if (ni.preppedByRef) {
     HHIR_EMIT(VGetL, locId);
   } else {
-    HHIR_EMIT(CGetL, locId);
+    HHIR_EMIT(FPassL, locId);
   }
 }
 
@@ -862,6 +861,9 @@ IRTranslator::translateSetOpL(const NormalizedInstruction& i) {
     case SetOpOp::PlusEqual:   return Op::Add;
     case SetOpOp::MinusEqual:  return Op::Sub;
     case SetOpOp::MulEqual:    return Op::Mul;
+    case SetOpOp::PlusEqualO:  return Op::AddO;
+    case SetOpOp::MinusEqualO: return Op::SubO;
+    case SetOpOp::MulEqualO:   return Op::MulO;
     case SetOpOp::DivEqual:    HHIR_UNIMPLEMENTED(SetOpL_Div);
     case SetOpOp::ConcatEqual: return Op::Concat;
     case SetOpOp::ModEqual:    HHIR_UNIMPLEMENTED(SetOpL_Mod);
@@ -878,12 +880,8 @@ IRTranslator::translateSetOpL(const NormalizedInstruction& i) {
 
 void
 IRTranslator::translateIncDecL(const NormalizedInstruction& i) {
-  const IncDecOp oplet = static_cast<IncDecOp>(i.imm[1].u_OA);
-  bool post = (oplet == IncDecOp::PostInc || oplet == IncDecOp::PostDec);
-  bool pre  = !post;
-  bool inc  = (oplet == IncDecOp::PostInc || oplet == IncDecOp::PreInc);
-
-  HHIR_EMIT(IncDecL, pre, inc, i.imm[0].u_LA);
+  auto const op = static_cast<IncDecOp>(i.imm[1].u_OA);
+  HHIR_EMIT(IncDecL, isPre(op), isInc(op), isIncDecO(op), i.imm[0].u_LA);
 }
 
 void
@@ -1090,8 +1088,8 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
     // If func has changed after an FCall, we've started an inlined call. This
     // will have to change when we support inlining recursive calls.
     if (func != iter.sk().func()) {
-      assert(isRet(op) || op == OpFCall);
-      if (op == OpFCall) {
+      assert(isRet(op) || op == Op::FCall || op == Op::FCallD);
+      if (op == Op::FCall || op == Op::FCallD) {
         funcs.push_back(iter.sk().func());
         int totalDepth = 0;
         for (auto* f : funcs) {
@@ -1119,7 +1117,7 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
       }
     }
 
-    if (op == OpFCallArray) return refuse("FCallArray");
+    if (op == Op::FCallArray) return refuse("FCallArray");
 
     // These opcodes don't indicate any additional work in the callee,
     // so they shouldn't count toward the inlining cost.
@@ -1227,6 +1225,10 @@ IRTranslator::translateFCall(const NormalizedInstruction& i) {
 
   HHIR_EMIT(FCall, numArgs, returnBcOffset, i.funcd,
             JIT::callDestroysLocals(i, m_hhbcTrans.curFunc()));
+}
+
+void IRTranslator::translateFCallD(const NormalizedInstruction& i) {
+  translateFCall(i);
 }
 
 void
@@ -1571,7 +1573,7 @@ IRTranslator::passPredictedAndInferredTypes(const NormalizedInstruction& i) {
     // that the type is not ref-counted.  This avoid both generating a
     // type check and dec-refing the value.
     if (i.outputPredictionStatic && isPop(i.next->op()) &&
-        !jitType.isCounted()) {
+        !jitType.maybeCounted()) {
       TRACE(1, "irPassPredictedAndInferredTypes: output inferred as %s\n",
             jitType.toString().c_str());
       m_hhbcTrans.assertTypeStack(0, JIT::Type::Uncounted);
@@ -1608,7 +1610,7 @@ void IRTranslator::translateInstr(const NormalizedInstruction& ni) {
   FTRACE(1, "\n{:-^60}\n", folly::format("translating {} with stack:\n{}",
                                          ni.toString(), ht.showStack()));
   // When profiling, we disable type predictions to avoid side exits
-  assert(JIT::tx64->mode() != TransProfile || !ni.outputPredicted);
+  assert(JIT::tx->mode() != TransProfile || !ni.outputPredicted);
 
   if (ni.guardedThis) {
     // Task #2067635: This should really generate an AssertThis

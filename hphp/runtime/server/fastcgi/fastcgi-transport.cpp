@@ -88,6 +88,11 @@ uint16_t FastCGITransport::getServerPort() {
   return (m_serverPort != 0) ? m_serverPort : Transport::getServerPort();
 }
 
+const char *FastCGITransport::getServerSoftware() {
+  return (!m_serverSoftware.empty()) ? m_serverSoftware.c_str() :
+                                       Transport::getServerSoftware();
+}
+
 const void *FastCGITransport::getPostData(int &size) {
   assert(!m_readMore);
   return getPostDataImpl(size, false);
@@ -191,11 +196,25 @@ std::string FastCGITransport::mangleHeader(const std::string& name) {
   return "HTTP_" + ret;
 }
 
+static const std::string
+  s_contentLength("CONTENT_LENGTH"),
+  s_contentType("CONTENT_TYPE");
+
 /**
  * Passed an HTTP header like "Cookie" or "Cache-Control"
  **/
 std::string FastCGITransport::getHeader(const char *name) {
-  return getRawHeader(mangleHeader(name));
+  auto *header = getRawHeaderPtr(mangleHeader(name));
+  if (header) {
+    return *header;
+  }
+  if (strcasecmp(name, "Content-Length") == 0) {
+    return getRawHeader(s_contentLength); // No HTTP_ prefix for CONTENT_LENGTH
+  }
+  if (strcasecmp(name, "Content-Type") == 0) {
+    return getRawHeader(s_contentType); // No HTTP_ prefix for CONTENT_TYPE
+  }
+  return "";
 }
 
 /**
@@ -254,7 +273,7 @@ void FastCGITransport::removeHeaderImpl(const char* name) {
   m_responseHeaders.erase(name);
 }
 
-const std::string
+static const std::string
   s_status("Status: "),
   s_colon(": "),
   s_newline("\r\n");
@@ -338,18 +357,18 @@ void FastCGITransport::onHeader(std::unique_ptr<folly::IOBuf> key_chain,
   m_requestHeaders.emplace(key, value);
 }
 
-const std::string
+static const std::string
   s_requestURI("REQUEST_URI"),
   s_remoteHost("REMOTE_HOST"),
   s_remoteAddr("REMOTE_ADDR"),
   s_serverName("SERVER_NAME"),
   s_serverAddr("SERVER_ADDR"),
+  s_serverSoftware("SERVER_SOFTWARE"),
   s_extendedMethod("REQUEST_METHOD"),
   s_httpVersion("HTTP_VERSION"),
   s_documentRoot("DOCUMENT_ROOT"),
   s_remotePort("REMOTE_PORT"),
   s_serverPort("SERVER_PORT"),
-  s_contentLength("CONTENT_LENGTH"),
   s_pathTranslated("PATH_TRANSLATED"),
   s_scriptName("SCRIPT_NAME"),
   s_scriptFilename("SCRIPT_FILENAME"),
@@ -362,11 +381,16 @@ void FastCGITransport::onHeadersComplete() {
   m_remoteAddr = getRawHeader(s_remoteAddr);
   m_serverName = getRawHeader(s_serverName);
   m_serverAddr = getRawHeader(s_serverAddr);
+  m_serverSoftware = getRawHeader(s_serverSoftware);
   m_extendedMethod = getRawHeader(s_extendedMethod);
   m_httpVersion = getRawHeader(s_httpVersion);
   m_serverObject = getRawHeader(s_scriptName);
   m_pathTranslated = getRawHeader(s_pathTranslated);
-  m_documentRoot = getRawHeader(s_documentRoot) + "/";
+  m_documentRoot = getRawHeader(s_documentRoot);
+  if (!m_documentRoot.empty() &&
+      m_documentRoot[m_documentRoot.length() - 1] != '/') {
+    m_documentRoot += '/';
+  }
 
   m_serverPort = getIntHeader(s_serverPort);
   m_requestSize = getIntHeader(s_contentLength);

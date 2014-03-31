@@ -208,11 +208,12 @@ void Macro::load(Hdf node) {
   node["cmds"].get(m_cmds);
 }
 
-void Macro::save(Hdf node) {
+void Macro::save(std::ostream &stream, int key) {
   TRACE(2, "Macro::save\n");
-  node["name"] = m_name;
+  stream << "hhvm.macro.visited." << key << ".name = " << m_name;
   for (unsigned int i = 0; i < m_cmds.size(); i++) {
-    node["cmds"][i] = m_cmds[i];
+    stream << "hhvm.macro.visited." << key << ".cmds[" << i << "] = "
+           << m_cmds[i];
   }
 }
 
@@ -339,6 +340,7 @@ static void get_color(int tokid, int prev, int next,
     COLOR_ENTRY(T_INC,                      None        );
     COLOR_ENTRY(T_LNUMBER,                  None        );
     COLOR_ENTRY(T_DNUMBER,                  None        );
+    COLOR_ENTRY(T_ONUMBER,                  None        );
     COLOR_ENTRY(T_STRING,                   None        );
     COLOR_ENTRY(T_STRING_VARNAME,           Variable    );
     COLOR_ENTRY(T_VARIABLE,                 Variable    );

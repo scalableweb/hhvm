@@ -24,7 +24,6 @@
 #include "hphp/util/async-func.h"
 #include "hphp/runtime/ext/ext_network.h"
 #include "hphp/runtime/ext/ext_socket.h"
-#include "hphp/runtime/ext/ext_options.h"
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/ext_file.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -90,7 +89,7 @@ bool TestMessage::bodyFromStr(const String& input) {
   return true;
 }
 
-bool TestMessage::fromJson(CVarRef json) {
+bool TestMessage::fromJson(const Variant& json) {
   if (!json.isArray()) {
     printf("Invalid format of a message\n");
     return false;
@@ -164,7 +163,7 @@ bool TestMessage::fromJson(CVarRef json) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-bool TestMessageExchange::fromJson(CVarRef json) {
+bool TestMessageExchange::fromJson(const Variant& json) {
   if (json.isNull()) {
     printf("Not a valid JSON\n");
     return false;

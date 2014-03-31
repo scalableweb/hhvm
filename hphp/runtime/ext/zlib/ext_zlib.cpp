@@ -22,6 +22,7 @@
 #include "hphp/runtime/base/stream-wrapper.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/base/file-stream-wrapper.h"
+#include "hphp/runtime/vm/native-data.h"
 #include "hphp/util/compression.h"
 #include "hphp/util/logger.h"
 #include "folly/String.h"
@@ -45,7 +46,7 @@ namespace {
 static class ZlibStreamWrapper : public Stream::Wrapper {
  public:
   virtual File* open(const String& filename, const String& mode,
-                     int options, CVarRef context) {
+                     int options, const Variant& context) {
     String fname;
     static const char cz[] = "compress.zlib://";
 
@@ -329,39 +330,39 @@ Variant HHVM_FUNCTION(gzopen, const String& filename, const String& mode,
   return handle;
 }
 
-bool HHVM_FUNCTION(gzclose, CResRef zp) {
+bool HHVM_FUNCTION(gzclose, const Resource& zp) {
   return f_fclose(zp);
 }
-Variant HHVM_FUNCTION(gzread, CResRef zp, int64_t length /* = 0 */) {
+Variant HHVM_FUNCTION(gzread, const Resource& zp, int64_t length /* = 0 */) {
   return f_fread(zp, length);
 }
-Variant HHVM_FUNCTION(gzseek, CResRef zp, int64_t offset,
+Variant HHVM_FUNCTION(gzseek, const Resource& zp, int64_t offset,
                               int64_t whence /* = k_SEEK_SET */) {
   return f_fseek(zp, offset, whence);
 }
-Variant HHVM_FUNCTION(gztell, CResRef zp) {
+Variant HHVM_FUNCTION(gztell, const Resource& zp) {
   return f_ftell(zp);
 }
-bool HHVM_FUNCTION(gzeof, CResRef zp) {
+bool HHVM_FUNCTION(gzeof, const Resource& zp) {
   return f_feof(zp);
 }
-bool HHVM_FUNCTION(gzrewind, CResRef zp) {
+bool HHVM_FUNCTION(gzrewind, const Resource& zp) {
   return f_rewind(zp);
 }
-Variant HHVM_FUNCTION(gzgetc, CResRef zp) {
+Variant HHVM_FUNCTION(gzgetc, const Resource& zp) {
   return f_fgetc(zp);
 }
-Variant HHVM_FUNCTION(gzgets, CResRef zp, int64_t length /* = 1024 */) {
+Variant HHVM_FUNCTION(gzgets, const Resource& zp, int64_t length /* = 1024 */) {
   return f_fgets(zp, length);
 }
-Variant HHVM_FUNCTION(gzgetss, CResRef zp, int64_t length /* = 0 */,
+Variant HHVM_FUNCTION(gzgetss, const Resource& zp, int64_t length /* = 0 */,
                             const String& allowable_tags /* = null_string */) {
   return f_fgetss(zp, length, allowable_tags);
 }
-Variant HHVM_FUNCTION(gzpassthru, CResRef zp) {
+Variant HHVM_FUNCTION(gzpassthru, const Resource& zp) {
   return f_fpassthru(zp);
 }
-Variant HHVM_FUNCTION(gzwrite, CResRef zp, const String& str,
+Variant HHVM_FUNCTION(gzwrite, const Resource& zp, const String& str,
                                int64_t length /* = 0 */) {
   return f_fwrite(zp, str, length);
 }
@@ -370,6 +371,8 @@ Variant HHVM_FUNCTION(gzwrite, CResRef zp, const String& str,
 // QuickLZ functions
 
 #ifdef HAVE_QUICKLZ
+
+#define QLZ_MEMORY_SAFE
 
 namespace QuickLZ1 {
 #ifdef QLZ_COMPRESSION_LEVEL
@@ -491,7 +494,9 @@ Variant HHVM_FUNCTION(qlzuncompress, const String& data, int level /* = 1 */) {
     }
   }
 
-  assert(dsize == size);
+  if (dsize != size) {
+    return false;
+  }
   return s.setSize(dsize);
 }
 #endif // HAVE_QUICKLZ
@@ -684,6 +689,87 @@ Variant HHVM_FUNCTION(lz4uncompress, const String& compressed) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Chunk-based API
+
+const StaticString s___SystemLib_ChunkedInflator("__SystemLib_ChunkedInflator");
+
+class __SystemLib_ChunkedInflator {
+ public:
+  __SystemLib_ChunkedInflator(): m_eof(false) {
+    m_zstream.zalloc = (alloc_func) Z_NULL;
+    m_zstream.zfree = (free_func) Z_NULL;
+    int status = inflateInit2(&m_zstream, -MAX_WBITS);
+    if (status != Z_OK) {
+      raise_error("Failed to init zlib: %d", status);
+    }
+  }
+
+  ~__SystemLib_ChunkedInflator() {
+    if (!eof()) {
+      inflateEnd(&m_zstream);
+    }
+  }
+
+  bool eof() const {
+    return m_eof;
+  }
+
+  String inflateChunk(const String& chunk) {
+    if (m_eof) {
+      raise_warning("Tried to inflate after final chunk");
+      return empty_string;
+    }
+    m_zstream.next_in = (Bytef*) chunk.data();
+    m_zstream.avail_in = chunk.length();
+    int factor = chunk.length() < 128 * 1024 * 1024 ? 4 : 2;
+    unsigned int maxfactor = 16;
+    do {
+      int buffer_length = chunk.length() * (1 << factor);
+      String buffer(SmallStringReserve, ReserveString);
+      char* raw = buffer.reserve(buffer_length).ptr;
+      m_zstream.next_out = (Bytef*) raw;
+      m_zstream.avail_out = buffer_length;
+
+      int status = inflate(&m_zstream, Z_SYNC_FLUSH);
+      if (status == Z_STREAM_END || status == Z_OK) {
+        if (status == Z_STREAM_END) {
+          m_eof = true;
+        }
+        int64_t produced = buffer_length - m_zstream.avail_out;
+        if (produced) {
+          return buffer.shrink(produced);
+        }
+        return empty_string;
+      }
+    } while (++factor < maxfactor);
+    raise_warning("Failed to extract chunk");
+    return empty_string;
+  }
+
+ private:
+  ::z_stream m_zstream;
+  bool m_eof;
+};
+
+#define FETCH_CHUNKED_INFLATOR(dest, src) \
+  assert(!src.isNull()); \
+  auto dest = Native::data<__SystemLib_ChunkedInflator>(src.get());
+
+bool HHVM_METHOD(__SystemLib_ChunkedInflator, eof) {
+  FETCH_CHUNKED_INFLATOR(data, this_);
+  assert(data);
+  return data->eof();
+}
+
+String HHVM_METHOD(__SystemLib_ChunkedInflator,
+                   inflateChunk,
+                   const String& chunk) {
+  FETCH_CHUNKED_INFLATOR(data, this_);
+  assert(data);
+  return data->inflateChunk(chunk);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 const StaticString s_FORCE_GZIP("FORCE_GZIP");
 const StaticString s_FORCE_DEFLATE("FORCE_DEFLATE");
@@ -737,6 +823,12 @@ class ZlibExtension : public Extension {
     HHVM_FE(lz4hccompress);
     HHVM_FE(lz4uncompress);
 
+    HHVM_ME(__SystemLib_ChunkedInflator, eof);
+    HHVM_ME(__SystemLib_ChunkedInflator, inflateChunk);
+
+    Native::registerNativeDataInfo<__SystemLib_ChunkedInflator>(
+      s___SystemLib_ChunkedInflator.get());
+
     loadSystemlib();
 #ifdef HAVE_QUICKLZ
     loadSystemlib("zlib-qlz");
@@ -746,6 +838,5 @@ class ZlibExtension : public Extension {
 #endif
   }
 } s_zlib_extension;
-
 ///////////////////////////////////////////////////////////////////////////////
 }

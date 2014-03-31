@@ -27,6 +27,7 @@
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/ext/ext_continuation.h"
 
 namespace HPHP { namespace Eval {
 
@@ -82,7 +83,7 @@ std::string InterruptSite::desc() const {
   return ret;
 }
 
-InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
+InterruptSite::InterruptSite(bool hardBreakPoint, const Variant& error)
     : m_error(error), m_activationRecord(nullptr),
       m_callingSite(nullptr), m_class(nullptr),
       m_file((StringData*)nullptr),
@@ -99,12 +100,14 @@ InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
     // so we need to construct the site on the caller
     fp = context->getPrevVMState(fp, &m_offset);
   } else {
-    const auto *pc = context->getPC();
-    bail_on(!fp->m_func);
-    m_unit = fp->m_func->unit();
+    auto const *pc = context->getPC();
+    auto f = fp->m_func;
+    bail_on(!f);
+    m_unit = f->unit();
     bail_on(!m_unit);
     m_offset = m_unit->offsetOf(pc);
-    if (m_offset == fp->m_func->base()) {
+    auto base = f->isGenerator() ? c_Continuation::userBase(f) : f->base();
+    if (m_offset == base) {
       m_funcEntry = true;
     }
   }
@@ -114,7 +117,7 @@ InterruptSite::InterruptSite(bool hardBreakPoint, CVarRef error)
 
 // Only used to look for callers by function name. No need to
 // to retrieve source line information for this kind of site.
-InterruptSite::InterruptSite(ActRec *fp, Offset offset, CVarRef error)
+InterruptSite::InterruptSite(ActRec *fp, Offset offset, const Variant& error)
   : m_error(error), m_activationRecord(nullptr),
     m_callingSite(nullptr), m_class(nullptr),
     m_file((StringData*)nullptr),
@@ -142,12 +145,6 @@ void InterruptSite::Initialize(ActRec *fp) {
     m_char1 = m_sourceLoc.char1;
   }
   m_function = fp->m_func->name()->data();
-  if (fp->inGenerator()) {
-    // Strip off "$continuation" to get the original function name
-    assert(m_function.compare(m_function.length() - 13,
-                              string::npos, "$continuation") == 0);
-    m_function.resize(m_function.length() - 13);
-  }
   if (fp->m_func->preClass()) {
     m_class = fp->m_func->preClass()->name()->data();
   } else {
@@ -1003,7 +1000,7 @@ bool BreakPointInfo::Match(const char *haystack, int haystack_len,
   return HPHP::same(r, 1);
 }
 
-bool BreakPointInfo::checkExceptionOrError(CVarRef e) {
+bool BreakPointInfo::checkExceptionOrError(const Variant& e) {
   TRACE(2, "BreakPointInfo::checkException\n");
   assert(!e.isNull());
   if (e.isObject()) {
@@ -1011,7 +1008,7 @@ bool BreakPointInfo::checkExceptionOrError(CVarRef e) {
       return Match(m_class.c_str(), m_class.size(),
                    e.toObject()->o_getClassName().data(), true, false);
     }
-    return e.instanceof(m_class.c_str());
+    return e.getObjectData()->o_instanceof(m_class.c_str());
   }
   return Match(m_class.c_str(), m_class.size(), ErrorClassName, m_regex,
                false);

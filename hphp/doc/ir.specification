@@ -455,13 +455,16 @@ D:Dbl     = MulDbl S0:Dbl S1:Dbl
 D:Int     = Mod    S0:Int S1:Int
 D:Dbl     = Sqrt   S0:Dbl
 D:Dbl     = DivDbl S0:Dbl S1:Dbl -> B
-D:Int     = BitAnd S0:Int S1:Int
-D:Int     = BitOr  S0:Int S1:Int
-D:Int     = BitXor S0:Int S1:Int
+D:Int     = AndInt S0:Int S1:Int
+D:Int     = OrInt  S0:Int S1:Int
+D:Int     = XorInt S0:Int S1:Int
 D:Int     = Shl    S0:Int S1:Int
 D:Int     = Shr    S0:Int S1:Int
 D:Dbl     = Floor  S0:Dbl
 D:Dbl     = Ceil   S0:Dbl
+D:Int     = AddIntO S0:Int S1:Int -> B
+D:Int     = SubIntO S0:Int S1:Int -> B
+D:Int     = MulIntO S0:Int S1:Int -> B
 
   Double arithmetic, integer arithmetic, and integer bitwise operations.
   Performs the operation described by the opcode name on S0 and S1, and puts
@@ -484,15 +487,14 @@ D:Dbl     = Ceil   S0:Dbl
   than their input respectively. Their use requires SSE 4.1, availability
   should be checked before they are emitted.
 
-D:Bool = LogicXor S0:Bool S1:Bool
+  AddIntO, SubIntO, MulIntO perform integer arithmetic on S0 and S1, but will
+  branch to block B on integer overflow.
+
+D:Bool = XorBool S0:Bool S1:Bool
 
   Logical XOR of the two sources. (Note that && and || do not have
   corresponding opcodes because they're handled at the bytecode level, to
   implement short-circuiting.)
-
-D:Bool = Not S0:Bool
-
-  Logical negation of the source.
 
 
 3. Type conversions
@@ -826,17 +828,16 @@ D:Func = LdClsCtor S0:Cls
   Loads into D the constructor of class S0. If the constructor cannot be called
   from the current context, raise an error.
 
-D:T = LdConst<T,value>
-
-  Load a constant value into D. This differs from DefConst in that D will be
-  allocated a register. It is currently used only for the GuardRefs
-  instruction.
-
 D:ConstT = DefConst<T>
 
   Define a constant value of type T. D is presumed to be globally available and
   the DefConst instruction will not actually appear in the IR instruction
   stream.
+
+D:T = Conjure<T>
+
+  Define a value of type T. This is meant to be used in tests, to create a
+  non-constant value as an opaque input to other instructions.
 
 D:Cls = LdCls S0:Str S1:ConstCls
 
@@ -1073,6 +1074,31 @@ D:BoxedCell = LdStaticLocCached<func,staticLocalName>
 D:Obj = AllocObj S1:Cls
 
   Allocates a new object of class S1.
+
+InitProps<class> -> B
+
+  Calls the property initializer function (86pinit) for class.  May throw.
+
+InitSProps<class> -> B
+
+  Calls the static property initializer function (86sinit) for class. May
+  throw.
+
+D:Obj = NewInstanceRaw<class>
+
+  Allocates an instance of class.
+
+InitObjProps<class> S0:Obj
+
+  Initializes properties of object S0.
+
+D:Obj = ConstructInstance<class>
+
+  Call the custom instance constructor of an extension class.
+
+D:Obj = CustomInstanceInit S0:Obj
+
+  Call the custom instance initializer of object S0.
 
 D:Obj = AllocObjFast<class>
 
@@ -1676,16 +1702,6 @@ D:Bool = ThingExists<class|interface|trait> S0:Str
 
 15. Register allocation
 
-
-D:T = Spill S0:T
-D:T = Reload S0:T
-
-  Spill stores from S0's registers into the spill location assigned to D.
-  Reload loads from S0's spill slot into D's assigned registers.
-
-  Spill and Reload are SSA copies, equivalent to Mov.  The destination
-  will be the same value and type as the source.  Like all operations
-  in SSA, the definition of the source must dominate the operation.
 
 Shuffle<d...> S...
 

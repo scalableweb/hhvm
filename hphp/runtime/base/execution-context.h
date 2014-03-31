@@ -120,22 +120,20 @@ enum class LookupResult {
   MethodNotFound,
 };
 
-enum InclOpFlags {
-  InclOpDefault = 0,
-  InclOpFatal = 1,
-  InclOpOnce = 2,
-  InclOpDocRoot = 8,
-  InclOpRelative = 16,
+enum class InclOpFlags {
+  Default = 0,
+  Fatal = 1,
+  Once = 2,
+  DocRoot = 8,
+  Relative = 16,
 };
 
-inline InclOpFlags
-operator|(const InclOpFlags &l, const InclOpFlags &r) {
-  return InclOpFlags(int(l) | int(r));
+inline InclOpFlags operator|(const InclOpFlags& l, const InclOpFlags& r) {
+  return static_cast<InclOpFlags>(static_cast<int>(l) | static_cast<int>(r));
 }
 
-inline InclOpFlags
-operator&(const InclOpFlags &l, const InclOpFlags &r) {
-  return InclOpFlags(int(l) & int(r));
+inline bool operator&(const InclOpFlags& l, const InclOpFlags& r) {
+  return static_cast<int>(l) & static_cast<int>(r);
 }
 
 struct VMParserFrame {
@@ -159,7 +157,6 @@ struct ExecutionContext {
   Stack m_stack;
   ActRec* m_fp;
   PC m_pc;
-  int64_t m_currentThreadIdx;
 
   enum ShutdownType {
     ShutDown,
@@ -225,7 +222,7 @@ public:
   /**
    * Output buffering.
    */
-  void obStart(CVarRef handler = uninit_null());
+  void obStart(const Variant& handler = uninit_null());
   String obCopyContents();
   String obDetachContents();
   int obGetContentLength();
@@ -252,7 +249,7 @@ public:
    * Request sequences and program execution hooks.
    */
   void registerRequestEventHandler(RequestEventHandler* handler);
-  void registerShutdownFunction(CVarRef function, Array arguments,
+  void registerShutdownFunction(const Variant& function, Array arguments,
                                 ShutdownType type);
   Variant popShutdownFunction(ShutdownType type);
   void onRequestShutdown();
@@ -262,8 +259,8 @@ public:
   /**
    * Error handling
    */
-  Variant pushUserErrorHandler(CVarRef function, int error_types);
-  Variant pushUserExceptionHandler(CVarRef function);
+  Variant pushUserErrorHandler(const Variant& function, int error_types);
+  Variant pushUserExceptionHandler(const Variant& function);
   void popUserErrorHandler();
   void popUserExceptionHandler();
   bool errorNeedsHandling(int errnum,
@@ -313,6 +310,10 @@ public:
   const String& getSandboxId() const { return m_sandboxId; }
   void setSandboxId(const String& sandboxId) { m_sandboxId = sandboxId; }
 
+  // This has to appear before m_userErrorHandlers since C++ destructs objects
+  // from last declared to first declared. If it was after, we would destroy
+  // the property table before the error handlers ran.
+  std::unordered_map<const ObjectData*,ArrayNoDtor> dynPropTable;
 private:
   class OutputBuffer {
   public:
@@ -369,7 +370,7 @@ private:
   const VirtualHost *m_vhost;
   // helper functions
   void resetCurrentBuffer();
-  void executeFunctions(CArrRef funcs);
+  void executeFunctions(const Array& funcs);
 
 public:
   DebuggerSettings debuggerSettings;
@@ -385,8 +386,8 @@ public:
   void requestInit();
   void requestExit();
 
-  static void fillContinuationVars(
-    ActRec* origFp, const Func* origFunc, ActRec* genFp, const Func* genFunc);
+  static void fillContinuationVars(const Func* func, ActRec* origFp,
+                                   ActRec* genFp);
   void pushLocalsAndIterators(const Func* f, int nparams = 0);
   void enqueueAPCHandle(APCHandle* handle);
 
@@ -451,6 +452,7 @@ private:
 OPCODES
 #undef O
 
+  void contEnterImpl(IOP_ARGS);
   void classExistsImpl(IOP_ARGS, Attr typeAttr);
   void fPushObjMethodImpl(
       Class* cls, StringData* name, ObjectData* obj, int numArgs);
@@ -460,8 +462,6 @@ public:
   typedef hphp_hash_map<const StringData*, ClassInfo::ConstantInfo*,
                         string_data_hash, string_data_same> ConstInfoMap;
   ConstInfoMap m_constInfo;
-
-  std::unordered_map<const ObjectData*,ArrayNoDtor> dynPropTable;
 
   const Func* lookupMethodCtx(const Class* cls,
                                         const StringData* methodName,
@@ -483,7 +483,7 @@ public:
                                 const Class* cls,
                                 bool raise = false);
   ObjectData* createObject(StringData* clsName,
-                           CVarRef params,
+                           const Variant& params,
                            bool init = true);
   ObjectData* createObjectOnly(StringData* clsName);
 
@@ -535,10 +535,6 @@ public:
   const Stack&  getStack() const { checkRegState(); return m_stack; }
         Stack&  getStack()       { checkRegState(); return m_stack; }
 
-  Offset pcOff() const {
-    return getFP()->m_func->unit()->offsetOf(m_pc);
-  }
-
   ActRec* m_firstAR;
   std::vector<Fault> m_faults;
 
@@ -569,19 +565,12 @@ public:
   void preventReturnsToTC();
   void destructObjects();
   int m_lambdaCounter;
-  struct ReentryRecord {
-    VMState m_savedState;
-    const ActRec* m_entryFP;
-    ReentryRecord(const VMState &s, const ActRec* entryFP) :
-        m_savedState(s), m_entryFP(entryFP) { }
-    ReentryRecord() {}
-  };
-  typedef TinyVector<ReentryRecord, 32> NestedVMVec;
+  typedef TinyVector<VMState, 32> NestedVMVec;
   NestedVMVec m_nestedVMs;
 
   int m_nesting;
   bool isNested() { return m_nesting != 0; }
-  void pushVMState(VMState &savedVM, const ActRec* reentryAR);
+  void pushVMState(Cell* savedSP);
   void popVMState();
 
   ActRec* getPrevVMState(const ActRec* fp,
@@ -603,21 +592,21 @@ public:
   bool doFCall(ActRec* ar, PC& pc);
   bool doFCallArray(PC& pc);
   bool doFCallArrayTC(PC pc);
-  CVarRef getEvaledArg(const StringData* val, const String& namespacedName);
+  const Variant& getEvaledArg(const StringData* val, const String& namespacedName);
   String getLastErrorPath() const { return m_lastErrorPath; }
   int getLastErrorLine() const { return m_lastErrorLine; }
 
 private:
-  void enterVMWork(ActRec* enterFnAr);
-  void enterVMPrologue(ActRec* enterFnAr);
-  void enterVM(TypedValue* retval, ActRec* ar);
-  void reenterVM(TypedValue* retval, ActRec* ar, TypedValue* savedSP);
+  void enterVMAtAsyncFunc(ActRec* enterFnAr, PC pc, ObjectData* exception);
+  void enterVMAtFunc(ActRec* enterFnAr);
+  void enterVMAtCurPC();
+  void enterVM(ActRec* ar, PC pc = nullptr, ObjectData* exception = nullptr);
   void doFPushCuf(IOP_ARGS, bool forward, bool safe);
   template <bool forwarding>
   void pushClsMethodImpl(Class* cls, StringData* name,
                          ObjectData* obj, int numArgs);
-  bool prepareFuncEntry(ActRec* ar, PC& pc);
-  bool prepareArrayArgs(ActRec* ar, CVarRef arrayArgs);
+  void prepareFuncEntry(ActRec* ar, PC& pc);
+  bool prepareArrayArgs(ActRec* ar, const Variant& arrayArgs);
   void recordCodeCoverage(PC pc);
   bool isReturnHelper(uintptr_t address);
   void switchModeForDebugger();
@@ -637,7 +626,7 @@ public:
   };
   void invokeFunc(TypedValue* retval,
                   const Func* f,
-                  CVarRef args_ = init_null_variant,
+                  const Variant& args_ = init_null_variant,
                   ObjectData* this_ = nullptr,
                   Class* class_ = nullptr,
                   VarEnv* varEnv = nullptr,
@@ -645,7 +634,7 @@ public:
                   InvokeFlags flags = InvokeNormal);
   void invokeFunc(TypedValue* retval,
                   const CallCtx& ctx,
-                  CVarRef args_,
+                  const Variant& args_,
                   VarEnv* varEnv = nullptr) {
     invokeFunc(retval, ctx.func, args_, ctx.this_, ctx.cls, varEnv,
                ctx.invName);
@@ -674,15 +663,14 @@ public:
                   ctx.cls ? (char*)ctx.cls + 1 : nullptr,
                   ctx.invName, argc, argv);
   }
-  void invokeContFunc(const Func* f,
-                      ObjectData* this_,
-                      Cell* param = nullptr);
+  void resumeAsyncFunc(c_Continuation& cont, Cell& awaitResult);
+  void resumeAsyncFuncThrow(c_Continuation& cont, ObjectData* exception);
+
   // VM ClassInfo support
   StringIMap<AtomicSmartPtr<MethodInfoVM> > m_functionInfos;
   StringIMap<AtomicSmartPtr<ClassInfoVM> >  m_classInfos;
   StringIMap<AtomicSmartPtr<ClassInfoVM> >  m_interfaceInfos;
   StringIMap<AtomicSmartPtr<ClassInfoVM> >  m_traitInfos;
-  Array getUserFunctionsInfo();
   Array getConstantsInfo();
   const ClassInfo::MethodInfo* findFunctionInfo(const String& name);
   const ClassInfo* findClassInfo(const String& name);
@@ -711,12 +699,7 @@ OPCODES
   // dispatchBB() tries to run until a control-flow instruction has been run.
   void dispatchBB();
 
-private:
-  static Mutex s_threadIdxLock;
-  static hphp_hash_map<pid_t, int64_t> s_threadIdxMap;
-
 public:
-  static int64_t s_threadIdxCounter;
   Variant m_setprofileCallback;
   bool m_executingSetprofileCallback;
 

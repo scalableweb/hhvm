@@ -20,6 +20,7 @@
 #include <functional>
 #include <exception>
 #include <utility>
+#include <iostream>
 
 #include "folly/Memory.h"
 #include "folly/Conv.h"
@@ -94,9 +95,18 @@ void truncateMap(Container& c, SrcKey final) {
 
 //////////////////////////////////////////////////////////////////////
 
+void RegionDesc::addArc(BlockId src, BlockId dst) {
+  arcs.push_back({src, dst});
+}
+
+//////////////////////////////////////////////////////////////////////
+
+RegionDesc::BlockId RegionDesc::Block::s_nextId = 0;
+
 RegionDesc::Block::Block(const Func* func, Offset start, int length,
                          Offset initSpOff)
-  : m_func(func)
+  : m_id(s_nextId++)
+  , m_func(func)
   , m_start(start)
   , m_last(kInvalidOffset)
   , m_length(length)
@@ -286,7 +296,11 @@ RegionDescPtr selectTraceletLegacy(Offset initSpOffset,
     assert(curBlock == nullptr || curBlock->length() > 0);
     region->blocks.push_back(
       std::make_shared<Block>(func, start.offset(), 0, spOff));
-    curBlock = region->blocks.back().get();
+    Block* newCurBlock = region->blocks.back().get();
+    if (curBlock) {
+      region->addArc(curBlock->id(), newCurBlock->id());
+    }
+    curBlock = newCurBlock;
   };
   newBlock(tlet.func(), sk, initSpOffset);
 
@@ -304,7 +318,7 @@ RegionDescPtr selectTraceletLegacy(Offset initSpOffset,
     }
 
     if (ni->calleeTrace && !ni->calleeTrace->m_inliningFailed) {
-      assert(ni->op() == OpFCall);
+      assert(ni->op() == Op::FCall || ni->op() == Op::FCallD);
       assert(ni->funcd == ni->calleeTrace->func());
       // This should be translated as an inlined call. Insert the blocks of the
       // callee in the region.
@@ -434,13 +448,14 @@ RegionDescPtr selectRegion(const RegionContext& context,
 }
 
 RegionDescPtr selectHotRegion(TransID transId,
-                              TranslatorX64* tx64) {
+                              MCGenerator* mcg) {
 
   assert(RuntimeOption::EvalJitPGO);
 
-  const ProfData* profData = tx64->profData();
+  const ProfData* profData = mcg->tx().profData();
   FuncId funcId = profData->transFuncId(transId);
-  TransCFG cfg(funcId, profData, tx64->getSrcDB(), tx64->getJmpToTransIDMap());
+  TransCFG cfg(funcId, profData, mcg->tx().getSrcDB(),
+               mcg->getJmpToTransIDMap());
   TransIDSet selectedTIDs;
   assert(regionMode() != RegionMode::Method);
   RegionDescPtr region;
@@ -461,7 +476,7 @@ RegionDescPtr selectHotRegion(TransID transId,
 
     cfg.print(dotFileName, funcId, profData, &selectedTIDs);
     FTRACE(5, "selectHotRegion: New Translation {} (file: {}) {}\n",
-           tx64->profData()->curTransID(), dotFileName,
+           mcg->tx().profData()->curTransID(), dotFileName,
            region ? show(*region) : std::string("empty region"));
   }
 
@@ -670,7 +685,7 @@ std::string show(const RegionContext& ctx) {
 
 std::string show(const RegionDesc::Block& b) {
   std::string ret{"Block "};
-  folly::toAppend(
+  folly::toAppend(b.id(), ' ',
     b.func()->fullName()->data(), '@', b.start().offset(),
     " length ", b.length(), " initSpOff ", b.initialSpOffset(), '\n',
     &ret
@@ -741,6 +756,10 @@ std::string show(const RegionDesc::Block& b) {
   return ret;
 }
 
+std::string show(const RegionDesc::Arc& arc) {
+  return folly::format("{} -> {}\n", arc.src, arc.dst).str();
+}
+
 std::string show(const RegionDesc& region) {
   return folly::format(
     "Region ({} blocks):\n{}",
@@ -749,6 +768,9 @@ std::string show(const RegionDesc& region) {
       std::string ret;
       for (auto& b : region.blocks) {
         folly::toAppend(show(*b), &ret);
+      }
+      for (auto& arc : region.arcs) {
+        folly::toAppend(show(arc), &ret);
       }
       return ret;
     }()

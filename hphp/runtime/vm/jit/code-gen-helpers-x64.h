@@ -27,13 +27,13 @@
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/service-requests-x64.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
+#include "hphp/runtime/vm/jit/ir.h"
 
 namespace HPHP {
 struct Func;
 namespace JIT {
 struct SSATmp;
 namespace X64 {
-
 
 //////////////////////////////////////////////////////////////////////
 
@@ -43,7 +43,7 @@ constexpr size_t kJmpTargetAlign = 16;
 
 void moveToAlign(CodeBlock& cb, size_t alignment = kJmpTargetAlign);
 
-void emitEagerSyncPoint(Asm& as, const HPHP::Opcode* pc);
+void emitEagerSyncPoint(Asm& as, const Op* pc);
 void emitEagerVMRegSave(Asm& as, RegSaveFlags flags);
 void emitGetGContext(Asm& as, PhysReg dest);
 
@@ -64,6 +64,18 @@ void emitLdClsCctx(Asm& as, PhysReg srcReg, PhysReg dstReg);
 
 void emitCall(Asm& as, TCA dest);
 void emitCall(Asm& as, CppCall call);
+
+// store imm to the 8-byte memory location at ref. Warning: don't use this
+// if you wanted an atomic store; large imms cause two stores.
+template<class Ref>
+void emitImmStoreq(Asm& as, Immed64 imm, Ref ref) {
+  if (imm.fits(sz::dword)) {
+    as.storeq(imm.l(), ref); // sign-extend to 64-bit then storeq
+  } else {
+    as.storel(int32_t(imm.q()), ref);
+    as.storel(int32_t(imm.q() >> 32), Ref(ref.r + 4));
+  }
+}
 
 void emitJmpOrJcc(Asm& as, ConditionCode cc, TCA dest);
 
@@ -108,7 +120,7 @@ inline void
 emitTLSLoad(X64Assembler& a, const ThreadLocalNoCheck<T>& datum,
             RegNumber reg) {
   uintptr_t virtualAddress = uintptr_t(&datum.m_node.m_p) - tlsBase();
-  a.    fs().load_disp32_reg64(virtualAddress, reg);
+  a.    fs().loadq(baseless(virtualAddress), r64(reg));
 }
 
 #else // USE_GCC_FAST_TLS
@@ -121,7 +133,7 @@ emitTLSLoad(X64Assembler& a, const ThreadLocalNoCheck<T>& datum,
   a.    emitImmReg(&datum.m_key, argNumToRegName[0]);
   a.    call((TCA)pthread_getspecific);
   if (reg != reg::rax) {
-    a.    mov_reg64_reg64(reg::rax, reg);
+    a.    movq(reg::rax, r64(reg));
   }
 }
 

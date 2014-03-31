@@ -185,6 +185,10 @@ class Framework {
     return $this->install_root;
   }
 
+  protected function getGitBranch(): string {
+    return $this->git_branch;
+  }
+
   //********************
   // Private setters
   //********************
@@ -490,11 +494,11 @@ class Framework {
   }
 
   public static function sortFile(string $file): bool {
-    $results = StableMap {};
+    $results = Map {};
     $handle = fopen($file, "r");
     if ($handle) {
       while (!feof($handle)) {
-        // trim out newline since StableMap doesn't like them in its keys
+        // trim out newline since Map doesn't like them in its keys
         $test = rtrim(fgets($handle), PHP_EOL);
         if ($test !== "") {
           $status = rtrim(fgets($handle), PHP_EOL);

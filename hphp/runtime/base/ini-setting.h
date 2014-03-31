@@ -17,13 +17,21 @@
 #ifndef incl_HPHP_INI_SETTING_H_
 #define incl_HPHP_INI_SETTING_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-variant.h"
+
 #include "folly/dynamic.h"
+
+#include <cstdint>
+#include <functional>
+#include <set>
+#include <string>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+class Array;
 class Extension;
+class String;
 
 bool ini_on_update(const folly::dynamic& value, bool& p);
 bool ini_on_update(const folly::dynamic& value, double& p);
@@ -35,6 +43,8 @@ bool ini_on_update(const folly::dynamic& value, uint32_t& p);
 bool ini_on_update(const folly::dynamic& value, uint64_t& p);
 bool ini_on_update(const folly::dynamic& value, std::string& p);
 bool ini_on_update(const folly::dynamic& value, String& p);
+bool ini_on_update(const folly::dynamic& value, Array& p);
+bool ini_on_update(const folly::dynamic& value, std::set<std::string>& p);
 folly::dynamic ini_get(bool& p);
 folly::dynamic ini_get(double& p);
 folly::dynamic ini_get(int16_t& p);
@@ -45,8 +55,15 @@ folly::dynamic ini_get(uint32_t& p);
 folly::dynamic ini_get(uint64_t& p);
 folly::dynamic ini_get(std::string& p);
 folly::dynamic ini_get(String& p);
+folly::dynamic ini_get(Array& p);
+folly::dynamic ini_get(std::set<std::string>& p);
 
 class IniSetting {
+  struct CallbackData {
+    Variant active_section;
+    Variant arr;
+  };
+
 public:
   static const Extension* CORE;
   enum ScannerMode {
@@ -74,10 +91,6 @@ public:
   };
   class SectionParserCallback : public ParserCallback {
   public:
-    struct CallbackData {
-      Variant active_section;
-      Variant arr;
-    };
     virtual void onSection(const std::string &name, void *arg);
     virtual void onLabel(const std::string &name, void *arg);
     virtual void onEntry(const std::string &key, const std::string &value,

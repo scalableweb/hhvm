@@ -18,7 +18,7 @@
 #include "hphp/runtime/ext/pdo_driver.h"
 #include "hphp/runtime/ext/pdo_sqlite.h"
 #include "hphp/runtime/ext/pdo_mysql.h"
-#include "hphp/runtime/ext/ext_variable.h"
+#include "hphp/runtime/ext/std/ext_std_variable.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -36,7 +36,7 @@ PDODriver::PDODriver(const char *name) : m_name(name) {
 
 PDOConnection *PDODriver::createConnection(const String& datasource,
                                            const String& username,
-                                           const String& password, CArrRef options) {
+                                           const String& password, const Array& options) {
   PDOConnection *conn = createConnectionObject();
   conn->data_source = std::string(datasource.data(), datasource.size());
   conn->username = std::string(username.data(), username.size());
@@ -79,10 +79,10 @@ void PDOConnection::sweep() {
 }
 
 void PDOConnection::persistentSave() {
-  String serialized = f_serialize(def_stmt_ctor_args);
+  String serialized = HHVM_FN(serialize)(def_stmt_ctor_args);
   serialized_def_stmt_ctor_args = std::string(serialized.data(),
     serialized.size());
-  def_stmt_ctor_args.reset();
+  def_stmt_ctor_args.releaseForSweep(); // we're called from requestShutdown
 }
 
 void PDOConnection::persistentRestore() {
@@ -101,7 +101,7 @@ bool PDOConnection::closer() {
 }
 
 bool PDOConnection::preparer(const String& sql, sp_PDOStatement *stmt,
-                             CVarRef options) {
+                             const Variant& options) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
 }
@@ -132,7 +132,7 @@ bool PDOConnection::rollback() {
   return false;
 }
 
-bool PDOConnection::setAttribute(int64_t attr, CVarRef value) {
+bool PDOConnection::setAttribute(int64_t attr, const Variant& value) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
 }
@@ -240,7 +240,7 @@ bool PDOStatement::paramHook(PDOBoundParam *param, PDOParamEvent event_type) {
   return false;
 }
 
-bool PDOStatement::setAttribute(int64_t attr, CVarRef value) {
+bool PDOStatement::setAttribute(int64_t attr, const Variant& value) {
   throw_pdo_exception(uninit_null(), uninit_null(), "This driver doesn't support %s", __func__);
   return false;
 }

@@ -54,10 +54,6 @@ namespace HPHP {
 
 IMPLEMENT_THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
 
-int64_t ExecutionContext::s_threadIdxCounter = 0;
-Mutex ExecutionContext::s_threadIdxLock;
-hphp_hash_map<pid_t, int64_t> ExecutionContext::s_threadIdxMap;
-
 ExecutionContext::ExecutionContext()
   : m_fp(nullptr)
   , m_pc(nullptr)
@@ -102,19 +98,6 @@ ExecutionContext::ExecutionContext()
                 "m_fp offset too large");
   static_assert(offsetof(ExecutionContext, m_pc) <= 0xff,
                 "m_pc offset too large");
-  static_assert(offsetof(ExecutionContext, m_currentThreadIdx) <= 0xff,
-                "m_currentThreadIdx offset too large");
-
-  {
-    Lock lock(s_threadIdxLock);
-    pid_t tid = Process::GetThreadPid();
-    if (auto const idx = folly::get_ptr(s_threadIdxMap, tid)) {
-      m_currentThreadIdx = *idx;
-    } else {
-      m_currentThreadIdx = s_threadIdxCounter++;
-      s_threadIdxMap[tid] = m_currentThreadIdx;
-    }
-  }
 }
 
 ExecutionContext::~ExecutionContext() {
@@ -130,10 +113,7 @@ ExecutionContext::~ExecutionContext() {
   delete m_breakPointFilter;
   delete m_lastLocFilter;
   obFlushAll();
-  for (std::list<OutputBuffer*>::const_iterator iter = m_buffers.begin();
-       iter != m_buffers.end(); ++iter) {
-    delete *iter;
-  }
+  for (auto& b : m_buffers) delete b;
 }
 
 void ExecutionContext::backupSession() {
@@ -162,8 +142,9 @@ String ExecutionContext::getMimeType() const {
     if (pos != String::npos) {
       mimetype = mimetype.substr(0, pos);
     }
-  } else if (m_transport && m_transport->sendDefaultContentType()) {
-    mimetype = m_transport->getDefaultContentType();
+  } else if (m_transport && m_transport->getUseDefaultContentType()) {
+    mimetype =
+        ThreadInfo::s_threadInfo->m_reqInjectionData.getDefaultMimeType();
   }
   return mimetype;
 }
@@ -185,7 +166,7 @@ void ExecutionContext::setContentType(const String& mimetype,
     contentType += "charset=";
     contentType += charset;
     m_transport->addHeader("Content-Type", contentType.c_str());
-    m_transport->setDefaultContentType(false);
+    m_transport->setUseDefaultContentType(false);
   }
 }
 
@@ -235,7 +216,7 @@ void ExecutionContext::obProtect(bool on) {
   m_protectedLevel = on ? m_buffers.size() : 0;
 }
 
-void ExecutionContext::obStart(CVarRef handler /* = null */) {
+void ExecutionContext::obStart(const Variant& handler /* = null */) {
   OutputBuffer *ob = new OutputBuffer();
   ob->handler = handler;
   m_buffers.push_back(ob);
@@ -420,12 +401,12 @@ void ExecutionContext::resetCurrentBuffer() {
 ///////////////////////////////////////////////////////////////////////////////
 // program executions
 
-void ExecutionContext::registerShutdownFunction(CVarRef function,
-                                                    Array arguments,
-                                                    ShutdownType type) {
+void ExecutionContext::registerShutdownFunction(const Variant& function,
+                                                Array arguments,
+                                                ShutdownType type) {
   Array callback = make_map_array(s_name, function, s_args, arguments);
-  Variant &funcs = m_shutdowns.lvalAt(type);
-  funcs.append(callback);
+  Variant& funcs = m_shutdowns.lvalAt(type);
+  forceToArray(funcs).append(callback);
 }
 
 Variant ExecutionContext::popShutdownFunction(ShutdownType type) {
@@ -433,10 +414,10 @@ Variant ExecutionContext::popShutdownFunction(ShutdownType type) {
   if (!funcs.isArray()) {
     return uninit_null();
   }
-  return funcs.pop();
+  return funcs.toArrRef().pop();
 }
 
-Variant ExecutionContext::pushUserErrorHandler(CVarRef function,
+Variant ExecutionContext::pushUserErrorHandler(const Variant& function,
                                                    int error_types) {
   Variant ret;
   if (!m_userErrorHandlers.empty()) {
@@ -446,7 +427,7 @@ Variant ExecutionContext::pushUserErrorHandler(CVarRef function,
   return ret;
 }
 
-Variant ExecutionContext::pushUserExceptionHandler(CVarRef function) {
+Variant ExecutionContext::pushUserExceptionHandler(const Variant& function) {
   Variant ret;
   if (!m_userExceptionHandlers.empty()) {
     ret = m_userExceptionHandlers.back();
@@ -501,7 +482,7 @@ void ExecutionContext::onRequestShutdown() {
   m_requestEventHandlerSet.clear();
 }
 
-void ExecutionContext::executeFunctions(CArrRef funcs) {
+void ExecutionContext::executeFunctions(const Array& funcs) {
   ThreadInfo::s_threadInfo->m_reqInjectionData.resetTimer(
     RuntimeOption::PspTimeoutSeconds);
 
@@ -512,11 +493,13 @@ void ExecutionContext::executeFunctions(CArrRef funcs) {
 }
 
 void ExecutionContext::onShutdownPreSend() {
+  // in case obStart was called without obFlush
+  SCOPE_EXIT { obFlushAll(); };
+
   if (!m_shutdowns.isNull() && m_shutdowns.exists(ShutDown)) {
+    SCOPE_EXIT { m_shutdowns.remove(ShutDown); };
     executeFunctions(m_shutdowns[ShutDown].toArray());
-    m_shutdowns.remove(ShutDown);
   }
-  obFlushAll(); // in case obStart was called without obFlush
 }
 
 extern void ext_session_request_shutdown();
@@ -528,12 +511,12 @@ void ExecutionContext::onShutdownPostSend() {
       ServerStatsHelper ssh("psp", ServerStatsHelper::TRACK_HWINST);
       if (!m_shutdowns.isNull()) {
         if (m_shutdowns.exists(PostSend)) {
+          SCOPE_EXIT { m_shutdowns.remove(PostSend); };
           executeFunctions(m_shutdowns[PostSend].toArray());
-          m_shutdowns.remove(PostSend);
         }
         if (m_shutdowns.exists(CleanUp)) {
+          SCOPE_EXIT { m_shutdowns.remove(CleanUp); };
           executeFunctions(m_shutdowns[CleanUp].toArray());
-          m_shutdowns.remove(CleanUp);
         }
       }
     } catch (const ExitException &e) {
@@ -683,10 +666,11 @@ bool ExecutionContext::callUserErrorHandler(const Exception &e, int errnum,
     }
     try {
       ErrorStateHelper esh(this, ErrorState::ExecutingUserHandler);
+      Array dummyContext = Array::Create();
       if (!same(vm_call_user_func
                 (m_userErrorHandlers.back().first,
                  make_packed_array(errnum, String(e.getMessage()), errfile,
-                                errline, "", backtrace)),
+                     errline, dummyContext, backtrace)),
                 false)) {
         return true;
       }
@@ -716,7 +700,7 @@ bool ExecutionContext::onFatalError(const Exception &e) {
   }
   // need to silence even with the AlwaysLogUnhandledExceptions flag set
   if (!silenced && RuntimeOption::AlwaysLogUnhandledExceptions) {
-    Logger::Log(Logger::LogError, "HipHop Fatal error: ", e,
+    Logger::Log(Logger::LogError, "\nFatal error: ", e,
                 file.c_str(), line);
   }
   bool handled = false;
@@ -724,7 +708,7 @@ bool ExecutionContext::onFatalError(const Exception &e) {
     handled = callUserErrorHandler(e, errnum, true);
   }
   if (!handled && !silenced && !RuntimeOption::AlwaysLogUnhandledExceptions) {
-    Logger::Log(Logger::LogError, "HipHop Fatal error: ", e,
+    Logger::Log(Logger::LogError, "\nFatal error: ", e,
                 file.c_str(), line);
   }
   return handled;
@@ -733,7 +717,7 @@ bool ExecutionContext::onFatalError(const Exception &e) {
 bool ExecutionContext::onUnhandledException(Object e) {
   String err = e.toString();
   if (RuntimeOption::AlwaysLogUnhandledExceptions) {
-    Logger::Error("HipHop Fatal error: Uncaught %s", err.data());
+    Logger::Error("\nFatal error: Uncaught %s", err.data());
   }
 
   if (e.instanceof(SystemLib::s_ExceptionClass)) {
@@ -752,7 +736,7 @@ bool ExecutionContext::onUnhandledException(Object e) {
   m_lastError = err;
 
   if (!RuntimeOption::AlwaysLogUnhandledExceptions) {
-    Logger::Error("HipHop Fatal error: Uncaught %s", err.data());
+    Logger::Error("\nFatal error: Uncaught %s", err.data());
   }
   return false;
 }

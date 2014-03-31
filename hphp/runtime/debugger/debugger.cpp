@@ -22,7 +22,7 @@
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
 #include "hphp/runtime/base/hphp-system.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/util/text-color.h"
 #include "hphp/util/logger.h"
@@ -274,7 +274,7 @@ void Debugger::Interrupt(int type, const char *program,
 // as "BreakPointReached". Currently this results in spurious work in the
 // debugger.
 void Debugger::InterruptVMHook(int type /* = BreakPointReached */,
-                               CVarRef e /* = null_variant */) {
+                               const Variant& e /* = null_variant */) {
   TRACE(2, "Debugger::InterruptVMHook\n");
   // Computing the interrupt site here pulls in more data from the Unit to
   // describe the current execution point.
@@ -518,7 +518,7 @@ void Debugger::removeProxy(DebuggerProxyPtr proxy) {
   m_proxyMap.erase(dummySid);
   // Clear the debugger blacklist PC upon last detach if JIT is used
   if (RuntimeOption::EvalJit && countConnectedProxy() == 0) {
-    JIT::tx64->clearDbgBL();
+    JIT::tx->clearDbgBL();
   }
 }
 

@@ -26,20 +26,18 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-APCHandle *Variant::getAPCHandle() const {
-  if (m_type == KindOfRef) {
-    return m_data.pref->var()->getAPCHandle();
+static APCHandle* getAPCHandle(const Variant& source) {
+  auto const cell = source.asCell();
+  if (cell->m_type == KindOfString) {
+    return cell->m_data.pstr->getAPCHandle();
   }
-  if (m_type == KindOfString) {
-    return m_data.pstr->getAPCHandle();
-  }
-  if (m_type == KindOfArray) {
-    return m_data.parr->getAPCHandle();
+  if (cell->m_type == KindOfArray) {
+    return cell->m_data.parr->getAPCHandle();
   }
   return nullptr;
 }
 
-APCHandle* APCHandle::Create(CVarRef source,
+APCHandle* APCHandle::Create(const Variant& source,
                              bool serialized,
                              bool inner /* = false */,
                              bool unserializeObj /* = false*/) {
@@ -47,7 +45,7 @@ APCHandle* APCHandle::Create(CVarRef source,
   // the wrapped APC object.
   // getAPCHandle() is responsible to check the conditions under which
   // a wrapped object can be returned
-  auto wrapped = source.getAPCHandle();
+  auto wrapped = getAPCHandle(source);
   if (UNLIKELY(wrapped && !unserializeObj && !wrapped->getUncounted())) {
     wrapped->reference();
     return wrapped;
@@ -55,7 +53,7 @@ APCHandle* APCHandle::Create(CVarRef source,
   return CreateSharedType(source, serialized, inner, unserializeObj);
 }
 
-APCHandle* APCHandle::CreateSharedType(CVarRef source,
+APCHandle* APCHandle::CreateSharedType(const Variant& source,
                                        bool serialized,
                                        bool inner,
                                        bool unserializeObj) {
@@ -226,7 +224,7 @@ void DataWalker::traverseData(ArrayData* data,
   }
 
   for (ArrayIter iter(data); iter; ++iter) {
-    CVarRef var = iter.secondRef();
+    const Variant& var = iter.secondRef();
 
     if (var.isReferenced()) {
       Variant *pvar = var.getRefData();

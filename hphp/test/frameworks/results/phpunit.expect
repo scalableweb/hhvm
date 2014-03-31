@@ -1,3 +1,7 @@
+CountTest::testCount
+.
+CountTest::testCountDoesNotChangeIteratorKey
+.
 Extensions_RepeatedTestTest::testRepeatedMoreThanOnce
 .
 Extensions_RepeatedTestTest::testRepeatedNegative
@@ -1995,6 +1999,8 @@ Util_TestTest::testGetRequirements with data set #1
 Util_TestTest::testGetRequirements with data set #10
 .
 Util_TestTest::testGetRequirements with data set #11
+.
+Util_TestTest::testGetRequirements with data set #12
 .
 Util_TestTest::testGetRequirements with data set #2
 .

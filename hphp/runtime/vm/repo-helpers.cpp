@@ -15,9 +15,11 @@
 */
 
 #include "hphp/runtime/vm/repo-helpers.h"
-#include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/blob-helper.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
+
+#include "hphp/runtime/vm/blob-helper.h"
+#include "hphp/runtime/vm/repo.h"
 
 namespace HPHP {
 
@@ -170,7 +172,7 @@ void RepoQuery::bindTypedValue(const char* paramName, const TypedValue& tv) {
     bindBlob(paramName, "", 0, true);
   } else {
     String blob = f_serialize(tvAsCVarRef(&tv));
-    bindBlob(paramName, blob->data(), blob->size());
+    bindBlob(paramName, blob.data(), blob.size());
   }
 }
 

@@ -15,11 +15,12 @@
 */
 
 #include "hphp/runtime/vm/debugger-hook.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/debugger/break_point.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_proxy.h"
 #include "hphp/runtime/base/file-repository.h"
+#include "hphp/runtime/ext/ext_continuation.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP {
@@ -27,7 +28,8 @@ namespace HPHP {
 //////////////////////////////////////////////////////////////////////////
 
 TRACE_SET_MOD(debuggerflow);
-using JIT::tx64;
+using JIT::tx;
+using JIT::mcg;
 
 // Hook called from the bytecode interpreter before every opcode executed while
 // a debugger is attached. The debugger may choose to hold the thread below
@@ -108,10 +110,10 @@ static void blacklistRangesInJit(const Unit* unit,
        it != offsets.end(); ++it) {
     for (PC pc = unit->at(it->m_base); pc < unit->at(it->m_past);
          pc += instrLen((Op*)pc)) {
-      tx64->addDbgBLPC(pc);
+      tx->addDbgBLPC(pc);
     }
   }
-  if (!tx64->addDbgGuards(unit)) {
+  if (!mcg->addDbgGuards(unit)) {
     Logger::Warning("Failed to set breakpoints in Jitted code");
   }
   // In this case, we may be setting a breakpoint in a tracelet which could
@@ -167,39 +169,26 @@ static void addBreakPointsInFile(Eval::DebuggerProxy* proxy,
 }
 
 static void addBreakPointFuncEntry(const Func* f) {
-  PC pc = f->unit()->at(f->base());
+  // we are in a generator, skip CreateCont / RetC / PopC opcodes
+  auto base = f->isGenerator() ? c_Continuation::userBase(f) : f->base();
+  auto pc = f->unit()->at(base);
+
   TRACE(5, "func() break %s : unit %p offset %d ==> pc %p)\n",
-        f->fullName()->data(), f->unit(), f->base(), pc);
+        f->fullName()->data(), f->unit(), base, pc);
   getBreakPointFilter()->addPC(pc);
   if (RuntimeOption::EvalJit) {
-    if (tx64->addDbgBLPC(pc)) {
+    if (tx->addDbgBLPC(pc)) {
       // if a new entry is added in blacklist
-      if (!tx64->addDbgGuard(f, f->base())) {
+      if (!mcg->addDbgGuard(f, base)) {
         Logger::Warning("Failed to set breakpoints in Jitted code");
       }
     }
   }
 }
 
-// See if the given name matches the function's name. For generators,
-// it will only return true if the given function is the generator,
-// not the stub which makes the generator. I.e., given name="genFoo"
-// this will return true when f's name is "genFoo$continuation", and
-// false for "genFoo". Note that while async functions follow the same
-// general codegen strategy as generators, the original function still
-// starts the work, so we treat generators from async functions
-// normally.
+// See if the given name matches the function's name.
 static bool matchFunctionName(std::string name, const Func* f) {
-  if (f->hasGeneratorAsBody() && !f->isAsync()) return false; // Original func
-  auto funcName = f->name()->data();
-  if (!f->isGenerator() || f->isAsync()) {
-    return name == funcName;
-  } else {
-    DEBUG_ONLY std::string s(funcName);
-    assert(s.compare(s.length() - 13, std::string::npos, "$continuation") == 0);
-    return name.compare(0, std::string::npos, funcName,
-      strlen(funcName) - 13) == 0;
-  }
+  return name == f->name()->data();
 }
 
 // If the proxy has an enabled breakpoint that matches entry into the given
@@ -249,9 +238,9 @@ void phpAddBreakPoint(const Unit* unit, Offset offset) {
   PC pc = unit->at(offset);
   getBreakPointFilter()->addPC(pc);
   if (RuntimeOption::EvalJit) {
-    if (tx64->addDbgBLPC(pc)) {
+    if (tx->addDbgBLPC(pc)) {
       // if a new entry is added in blacklist
-      if (!tx64->addDbgGuards(unit)) {
+      if (!mcg->addDbgGuards(unit)) {
         Logger::Warning("Failed to set breakpoints in Jitted code");
       }
       // In this case, we may be setting a breakpoint in a tracelet which could
@@ -339,15 +328,6 @@ void phpSetBreakPoints(Eval::DebuggerProxy* proxy) {
       auto fName = makeStaticString(funcName);
       Func* f = Unit::lookupFunc(fName);
       if (f == nullptr) continue;
-      if (f->hasGeneratorAsBody() && !f->isAsync()) {
-        // This function is a generator, and it's the original
-        // function which has been turned into a stub which creates a
-        // continuation. We want to set the breakpoint on the
-        // continuation function instead.
-        fName = makeStaticString(funcName + "$continuation");
-        f = Unit::lookupFunc(fName);
-        if (f == nullptr) continue;
-      }
       bp->m_bindState = Eval::BreakPointInfo::KnownToBeValid;
       addBreakPointFuncEntry(f);
       continue;
@@ -479,11 +459,12 @@ void PCFilter::addRanges(const Unit* unit, const OffsetRangeVec& offsets,
     TRACE(3, "\toffsets [%d, %d)\n", range->m_base, range->m_past);
     for (PC pc = unit->at(range->m_base); pc < unit->at(range->m_past);
          pc += instrLen((Op*)pc)) {
-      if (isOpcodeAllowed(toOp(*pc))) {
+      if (isOpcodeAllowed(*reinterpret_cast<const Op*>(pc))) {
         TRACE(3, "\t\tpc %p\n", pc);
         addPC(pc);
       } else {
-        TRACE(3, "\t\tpc %p -- skipping (offset %d)\n", pc, unit->offsetOf(pc));
+        TRACE(3, "\t\tpc %p -- skipping (offset %d)\n", pc,
+          unit->offsetOf(pc));
       }
     }
   }

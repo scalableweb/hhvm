@@ -33,14 +33,14 @@
 
 #include "hphp/runtime/base/complex-types.h"
 #include "ext/standard/php_smart_str.h"
-#include "hphp/runtime/ext/ext_variable.h"
+#include "hphp/runtime/ext/std/ext_std_variable.h"
 
 #define COMMON (Z_ISREF_PP(struc) ? "&" : "")
 /* }}} */
 
 PHPAPI void php_var_serialize(smart_str *buf, zval **struc, php_serialize_data_t *var_hash TSRMLS_DC) {
   HPHP::String s = HPHP::f_serialize(HPHP::tvAsVariant((*struc)->tv()));
-  smart_str_appendl(buf, s->data(), s->size());
+  smart_str_appendl(buf, s.data(), s.size());
 }
 PHPAPI int php_var_unserialize(zval **rval, const unsigned char **p, const unsigned char *max, php_unserialize_data_t *var_hash TSRMLS_DC) {
   HPHP::Variant ret = HPHP::f_unserialize(HPHP::String((const char*) *p, max - *p, HPHP::CopyString));

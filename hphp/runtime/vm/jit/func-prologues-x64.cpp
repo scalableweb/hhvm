@@ -21,16 +21,17 @@
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/srckey.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers-x64.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
-#include "hphp/runtime/vm/jit/translator-x64-internal.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mc-generator-internal.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
+#include "hphp/runtime/vm/jit/translator-runtime.h"
 
 namespace HPHP { namespace JIT { namespace X64 {
 
 //////////////////////////////////////////////////////////////////////
 
 
-TRACE_SET_MOD(tx64);
+TRACE_SET_MOD(mcg);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -40,11 +41,11 @@ void emitStackCheck(X64Assembler& a, int funcDepth, Offset pc) {
   using namespace reg;
   funcDepth += kStackCheckPadding * sizeof(Cell);
 
-  uint64_t stackMask = cellsToBytes(RuntimeOption::EvalVMStackElms) - 1;
+  int stackMask = cellsToBytes(RuntimeOption::EvalVMStackElms) - 1;
   a.    movq   (rVmSp, rAsm);  // copy to destroy
   a.    andq   (stackMask, rAsm);
   a.    subq   (funcDepth + Stack::sSurprisePageSize, rAsm);
-  a.    jl     (tx64->uniqueStubs.stackOverflowHelper);
+  a.    jl     (tx->uniqueStubs.stackOverflowHelper);
 }
 
 /*
@@ -67,12 +68,13 @@ TCA emitFuncGuard(X64Assembler& a, const Func* func) {
 
   const int kAlign = kX64CacheLineSize;
   const int kAlignMask = kAlign - 1;
+  auto funcImm = Immed64(func);
   int loBits = uintptr_t(a.frontier()) & kAlignMask;
   int delta, size;
 
   // Ensure the immediate is safely smashable
   // the immediate must not cross a qword boundary,
-  if (!deltaFits((intptr_t)func, sz::dword)) {
+  if (!funcImm.fits(sz::dword)) {
     size = 8;
     delta = loBits + kFuncMovImm;
   } else {
@@ -86,7 +88,7 @@ TCA emitFuncGuard(X64Assembler& a, const Func* func) {
   }
 
   TCA aStart DEBUG_ONLY = a.frontier();
-  if (!deltaFits((intptr_t)func, sz::dword)) {
+  if (!funcImm.fits(sz::dword)) {
     a.  loadq  (rStashedAR[AROFF(m_func)], rax);
     /*
       Although func doesnt fit in a signed 32-bit immediate, it may still
@@ -99,9 +101,9 @@ TCA emitFuncGuard(X64Assembler& a, const Func* func) {
     ((uint64_t*)a.frontier())[-1] = uintptr_t(func);
     a.  cmpq   (rax, rdx);
   } else {
-    a.  cmpq   (func, rStashedAR[AROFF(m_func)]);
+    a.  cmpq   (funcImm.l(), rStashedAR[AROFF(m_func)]);
   }
-  a.    jnz    (tx64->uniqueStubs.funcPrologueRedispatch);
+  a.    jnz    (tx->uniqueStubs.funcPrologueRedispatch);
 
   assert(funcPrologueToGuard(a.frontier(), func) == aStart);
   assert(funcPrologueHasGuard(a.frontier(), func));
@@ -126,14 +128,12 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 
   Offset entryOffset = func->getEntryForNumArgs(nPassed);
 
-  assert(IMPLIES(func->isGenerator(), nPassed == numParams));
+  Asm a { mcg->code.main() };
 
-  Asm a { tx64->code.main() };
-
-  if (tx64->mode() == TransProflogue) {
+  if (tx->mode() == TransProflogue) {
     assert(func->shouldPGO());
-    TransID transId  = tx64->profData()->curTransID();
-    auto counterAddr = tx64->profData()->transCounterAddr(transId);
+    TransID transId  = tx->profData()->curTransID();
+    auto counterAddr = tx->profData()->transCounterAddr(transId);
     a.movq(counterAddr, rAsm);
     a.decq(rAsm[0]);
   }
@@ -165,7 +165,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       // This should be an unusual case, so optimize for code density
       // rather than execution speed; i.e., don't unroll the loop.
       TCA loopTop = a.frontier();
-      a.    subq   (sizeof(Cell), rVmSp);
+      a.    subq   (int(sizeof(Cell)), rVmSp);
       a.    incl   (eax);
       emitStoreUninitNull(a, 0, rVmSp);
       a.    cmpl   (numParams, eax);
@@ -229,12 +229,10 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 
   // We're in the callee frame; initialize locals. Unroll the loop all
   // the way if there are a modest number of locals to update;
-  // otherwise, do it in a compact loop. If we're in a generator body,
-  // named locals will be initialized by UnpackCont so we can leave
-  // them alone here.
+  // otherwise, do it in a compact loop.
   int numUninitLocals = func->numLocals() - numLocals;
   assert(numUninitLocals >= 0);
-  if (numUninitLocals > 0 && !func->isGenerator()) {
+  if (numUninitLocals > 0) {
 
     // If there are too many locals, then emitting a loop to initialize locals
     // is more compact, rather than emitting a slew of movs inline.
@@ -255,7 +253,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       // } while(++loopReg != loopEnd);
 
       emitStoreTVType(a, edx, rVmFp[loopReg]);
-      a.  addq   (sizeof(Cell), loopReg);
+      a.  addq   (int(sizeof(Cell)), loopReg);
       a.  cmpq   (loopEnd, loopReg);
       a.  jcc8   (CC_NE, topOfLoop);
     } else {
@@ -272,16 +270,12 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
     }
   }
 
-  const HPHP::Opcode* destPC = func->unit()->entry() + entryOffset;
+  auto destPC = func->unit()->entry() + entryOffset;
   SrcKey funcBody(func, destPC);
 
   // Move rVmSp to the right place: just past all locals
   int frameCells = func->numSlotsInFrame();
-  if (func->isGenerator()) {
-    frameCells = 1;
-  } else {
-    emitLea(a, rVmFp[-cellsToBytes(frameCells)], rVmSp);
-  }
+  emitLea(a, rVmFp[-cellsToBytes(frameCells)], rVmSp);
 
   Fixup fixup(funcBody.offset() - func->base(), frameCells);
 
@@ -293,7 +287,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
         a.  emitImmReg(numParams, argNumToRegName[1]);
         a.  emitImmReg(i, argNumToRegName[2]);
         emitCall(a, (TCA)raiseMissingArgument);
-        tx64->fixupMap().recordFixup(a.frontier(), fixup);
+        mcg->fixupMap().recordFixup(a.frontier(), fixup);
         break;
       }
     }
@@ -302,8 +296,8 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
   // Check surprise flags in the same place as the interpreter: after
   // setting up the callee's frame but before executing any of its
   // code
-  emitCheckSurpriseFlagsEnter(tx64->code.main(), tx64->code.stubs(), false,
-                              tx64->fixupMap(), fixup);
+  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.stubs(), false,
+                              mcg->fixupMap(), fixup);
 
   if (func->isClosureBody() && func->cls()) {
     int entry = nPassed <= numParams ? nPassed : numParams + 1;
@@ -313,7 +307,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
                    rax);
     a.    jmp     (rax);
   } else {
-    emitBindJmp(tx64->code.main(), tx64->code.stubs(), funcBody);
+    emitBindJmp(mcg->code.main(), mcg->code.stubs(), funcBody);
   }
   return funcBody;
 }
@@ -323,19 +317,18 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 //////////////////////////////////////////////////////////////////////
 
 TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs) {
-  auto& mainCode = tx64->code.main();
-  auto& stubsCode = tx64->code.stubs();
+  auto& mainCode = mcg->code.main();
+  auto& stubsCode = mcg->code.stubs();
   Asm a { mainCode };
   TCA start = mainCode.frontier();
   if (dvs.size() == 1) {
-    a.  cmp_imm32_disp_reg32(dvs[0].first,
-                             AROFF(m_numArgsAndGenCtorFlags), rVmFp);
+    a.  cmpl  (dvs[0].first, rVmFp[AROFF(m_numArgsAndGenCtorFlags)]);
     emitBindJcc(mainCode, stubsCode, CC_LE, SrcKey(func, dvs[0].second));
     emitBindJmp(mainCode, stubsCode, SrcKey(func, func->base()));
   } else {
-    a.  load_reg64_disp_reg32(rVmFp, AROFF(m_numArgsAndGenCtorFlags), reg::rax);
+    a.    loadl  (rVmFp[AROFF(m_numArgsAndGenCtorFlags)], reg::eax);
     for (unsigned i = 0; i < dvs.size(); i++) {
-      a.  cmp_imm32_reg32(dvs[i].first, reg::rax);
+      a.  cmpl   (dvs[i].first, reg::eax);
       emitBindJcc(mainCode, stubsCode, CC_LE, SrcKey(func, dvs[i].second));
     }
     emitBindJmp(mainCode, stubsCode, SrcKey(func, func->base()));
@@ -345,7 +338,7 @@ TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs) {
 
 SrcKey emitFuncPrologue(Func* func, int nPassed, TCA& start) {
   assert(!func->isMagic());
-  Asm a { tx64->code.main() };
+  Asm a { mcg->code.main() };
 
   start = emitFuncGuard(a, func);
   if (RuntimeOption::EvalJitTransCounters) emitTransCounterInc(a);
@@ -360,7 +353,7 @@ SrcKey emitMagicFuncPrologue(Func* func, uint32_t nPassed, TCA& start) {
   using namespace reg;
   using MkPacked = HphpArray* (*)(uint32_t, const TypedValue*);
 
-  Asm a { tx64->code.main() };
+  Asm a { mcg->code.main() };
   Label not_magic_call;
   auto const rInvName = r13;
   assert(!kSpecialCrossTraceRegs.contains(r13));
@@ -435,7 +428,8 @@ SrcKey emitMagicFuncPrologue(Func* func, uint32_t nPassed, TCA& start) {
   a.    storeq (rInvName, strTV[TVOFF(m_data)]);
   emitStoreTVType(a, KindOfArray, arrayTV[TVOFF(m_type)]);
   if (nPassed == 0) {
-    a.  storeq (HphpArray::GetStaticEmptyArray(), arrayTV[TVOFF(m_data)]);
+    emitImmStoreq(a, HphpArray::GetStaticEmptyArray(),
+                  arrayTV[TVOFF(m_data)]);
   } else {
     a.  storeq (rax, arrayTV[TVOFF(m_data)]);
   }
@@ -447,7 +441,7 @@ SrcKey emitMagicFuncPrologue(Func* func, uint32_t nPassed, TCA& start) {
   if (nPassed == 2) skFuncBody = skFor2Args;
 
   if (RuntimeOption::HHProfServerEnabled && callFixup) {
-    tx64->fixupMap().recordFixup(
+    mcg->fixupMap().recordFixup(
       callFixup,
       Fixup { skFuncBody.offset() - func->base(), func->numSlotsInFrame() }
     );

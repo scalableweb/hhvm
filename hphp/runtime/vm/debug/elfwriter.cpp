@@ -19,6 +19,7 @@
 #include <gelf.h>
 #include <string>
 #include <vector>
+#include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -26,7 +27,7 @@
 #include "hphp/util/asm-x64.h"
 
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 
 using namespace HPHP::JIT;
 
@@ -532,7 +533,7 @@ int ElfWriter::writeStringSection() {
 
 int ElfWriter::writeTextSection() {
   int section = -1;
-  CodeBlock& a = tx64->code.main();
+  CodeBlock& a = mcg->code.main();
   if ((section = newSection(
       ".text.tracelets", a.capacity(), SHT_NOBITS, SHF_ALLOC | SHF_EXECINSTR,
       reinterpret_cast<uint64_t>(a.base()))) < 0) {

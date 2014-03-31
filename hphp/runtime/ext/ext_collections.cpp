@@ -20,7 +20,6 @@
 #include "hphp/runtime/base/sort-helpers.h"
 #include "hphp/runtime/ext/ext_array.h"
 #include "hphp/runtime/ext/ext_math.h"
-#include "hphp/runtime/ext/ext_intl.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/system/systemlib.h"
 
@@ -85,7 +84,7 @@ void throwStrOOB(StringData* key) {
   throw e;
 }
 
-ArrayIter getArrayIterHelper(CVarRef v, size_t& sz) {
+ArrayIter getArrayIterHelper(const Variant& v, size_t& sz) {
   if (v.isArray()) {
     ArrayData* ad = v.getArrayData();
     sz = ad->size();
@@ -94,7 +93,7 @@ ArrayIter getArrayIterHelper(CVarRef v, size_t& sz) {
   if (v.isObject()) {
     ObjectData* obj = v.getObjectData();
     if (obj->isCollection()) {
-      sz = obj->getCollectionSize();
+      sz = getCollectionSize(obj);
       return ArrayIter(obj);
     }
     bool isIterable;
@@ -110,7 +109,7 @@ ArrayIter getArrayIterHelper(CVarRef v, size_t& sz) {
 }
 
 void triggerCow(c_Vector* vec) {
-  assert(!vec->m_immCopy.isNull()); // Should've been checked by the JIT.
+  assert(vec->hasImmutableBuffer()); // Should've been checked by the JIT.
   vec->mutate();
 }
 
@@ -150,7 +149,7 @@ Object BaseVector::items() {
 }
 
 // ConstIndexAccess
-bool BaseVector::containskey(CVarRef key) {
+bool BaseVector::containskey(const Variant& key) {
   if (key.isInteger()) {
     return contains(key.toInt64());
   }
@@ -158,7 +157,7 @@ bool BaseVector::containskey(CVarRef key) {
   return false;
 }
 
-Variant BaseVector::at(CVarRef key) {
+Variant BaseVector::at(const Variant& key) {
   if (key.isInteger()) {
     return tvAsCVarRef(at(key.toInt64()));
   }
@@ -166,7 +165,7 @@ Variant BaseVector::at(CVarRef key) {
   return uninit_null();
 }
 
-Variant BaseVector::get(CVarRef key) {
+Variant BaseVector::get(const Variant& key) {
   if (key.isInteger()) {
     TypedValue* tv = get(key.toInt64());
     if (tv) {
@@ -206,7 +205,7 @@ static std::array<TypedValue, 2> makeArgsFromVectorKeyAndValue(
 template<class TVector, class MakeArgs>
 typename std::enable_if<
   std::is_base_of<BaseVector, TVector>::value, Object>::type
-BaseVector::php_map(CVarRef callback, MakeArgs makeArgs) {
+BaseVector::php_map(const Variant& callback, MakeArgs makeArgs) {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -235,7 +234,7 @@ BaseVector::php_map(CVarRef callback, MakeArgs makeArgs) {
 template<class TVector, class MakeArgs>
 typename std::enable_if<
   std::is_base_of<BaseVector, TVector>::value, Object>::type
-BaseVector::php_filter(CVarRef callback, MakeArgs makeArgs) {
+BaseVector::php_filter(const Variant& callback, MakeArgs makeArgs) {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -260,7 +259,172 @@ BaseVector::php_filter(CVarRef callback, MakeArgs makeArgs) {
   return nv;
 }
 
-void BaseVector::zip(BaseVector* bvec, CVarRef iterable) {
+Object c_Vector::ti_slice(const Variant& vec, const Variant& offset,
+                          const Variant& len /* = uninit_null() */) {
+  ObjectData* obj;
+  if (!vec.isObject() ||
+      (obj = vec.getObjectData())->getVMClass() != c_Vector::classof()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter 1 must be an instance of Vector"));
+    throw e;
+  }
+  if (!offset.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter 2 must be an integer"));
+    throw e;
+  }
+  if (!len.isNull() && !len.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter 3 must be null or an integer"));
+    throw e;
+  }
+  auto* target = NEWOBJ(c_Vector)();
+  Object ret = target;
+  auto* v = static_cast<c_Vector*>(obj);
+  int64_t sz = v->m_size;
+  int64_t startPos = offset.toInt64();
+  if (UNLIKELY(uint64_t(startPos) >= uint64_t(sz))) {
+    if (startPos >= 0) {
+      assert(startPos >= sz);
+      return ret;
+    }
+    startPos = std::max<int64_t>(sz + startPos, 0);
+  }
+  int64_t endPos;
+  if (len.isInteger()) {
+    int64_t intLen = len.toInt64();
+    if (LIKELY(intLen >= 0)) {
+      endPos = startPos + std::min<int64_t>(intLen, sz - startPos);
+    } else {
+      endPos = sz + intLen;
+    }
+  } else {
+    endPos = sz;
+  }
+  if (startPos >= endPos) {
+    return ret;
+  }
+  uint targetSize = endPos - startPos;
+  target->reserve(targetSize);
+  target->m_size = targetSize;
+  auto* data = target->m_data;
+  for (uint i = 0; i < targetSize; ++i, ++startPos) {
+    cellDup(v->m_data[startPos], data[i]);
+  }
+  return ret;
+}
+
+template<class TVector>
+typename std::enable_if<
+  std::is_base_of<BaseVector, TVector>::value, Object>::type
+BaseVector::php_take(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  auto* vec = NEWOBJ(TVector)();
+  Object obj = vec;
+  if (len <= 0) {
+    return obj;
+  }
+  size_t sz = std::min(size_t(len), size_t(m_size));
+  vec->reserve(sz);
+  vec->m_size = sz;
+  for (size_t i = 0; i < sz; ++i) {
+    cellDup(m_data[i], vec->m_data[i]);
+  }
+  return obj;
+}
+
+template<class TVector, bool checkVersion>
+typename std::enable_if<
+  std::is_base_of<BaseVector, TVector>::value, Object>::type
+BaseVector::php_takeWhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* vec = NEWOBJ(TVector)();
+  Object obj = vec;
+  for (uint i = 0; i < m_size; ++i) {
+    Variant retval;
+    if (checkVersion) {
+      int32_t version = m_version;
+      g_context->invokeFuncFew(retval.asTypedValue(), ctx, 1, &m_data[i]);
+      if (UNLIKELY(version != m_version)) {
+        throw_collection_modified();
+      }
+    } else {
+      g_context->invokeFuncFew(retval.asTypedValue(), ctx, 1, &m_data[i]);
+    }
+    if (!retval.toBoolean()) break;
+    vec->add(&m_data[i]);
+  }
+  return obj;
+}
+
+template<class TVector>
+typename std::enable_if<
+  std::is_base_of<BaseVector, TVector>::value, Object>::type
+BaseVector::php_skip(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  auto* vec = NEWOBJ(TVector)();
+  Object obj = vec;
+  if (len <= 0) len = 0;
+  size_t skipAmt = std::min<size_t>(len, m_size);
+  size_t sz = size_t(m_size) - skipAmt;
+  vec->reserve(sz);
+  vec->m_size = sz;
+  for (size_t i = 0; i < sz; ++i) {
+    cellDup(m_data[i + skipAmt], vec->m_data[i]);
+  }
+  return obj;
+}
+
+template<class TVector, bool checkVersion>
+typename std::enable_if<
+  std::is_base_of<BaseVector, TVector>::value, Object>::type
+BaseVector::php_skipWhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* vec = NEWOBJ(TVector)();
+  Object obj = vec;
+  uint i = 0;
+  for (; i < m_size; ++i) {
+    Variant retval;
+    if (checkVersion) {
+      int32_t version = m_version;
+      g_context->invokeFuncFew(retval.asTypedValue(), ctx, 1, &m_data[i]);
+      if (UNLIKELY(version != m_version)) {
+        throw_collection_modified();
+      }
+    } else {
+      g_context->invokeFuncFew(retval.asTypedValue(), ctx, 1, &m_data[i]);
+    }
+    if (!retval.toBoolean()) break;
+  }
+  for (; i < m_size; ++i) {
+    vec->add(&m_data[i]);
+  }
+  return obj;
+}
+
+void BaseVector::zip(BaseVector* bvec, const Variant& iterable) {
   size_t itSize;
   ArrayIter iter = getArrayIterHelper(iterable, itSize);
   uint sz = m_size;
@@ -306,7 +470,7 @@ void BaseVector::keys(BaseVector* bvec) {
 
 // Others
 
-void BaseVector::construct(CVarRef iterable /* = null_variant */) {
+void BaseVector::construct(const Variant& iterable /* = null_variant */) {
   if (iterable.isNull()) return;
   init(iterable);
 }
@@ -332,7 +496,7 @@ Array BaseVector::tovaluesarray() {
   return toArrayImpl();
 }
 
-int64_t BaseVector::linearsearch(CVarRef search_value) {
+int64_t BaseVector::linearsearch(const Variant& search_value) {
   uint sz = m_size;
   for (uint i = 0; i < sz; ++i) {
     if (same(search_value, tvAsCVarRef(&m_data[i]))) {
@@ -382,7 +546,7 @@ bool BaseVector::OffsetContains(ObjectData* obj, TypedValue* key) {
 }
 
 template <bool throwOnMiss>
-TypedValue* BaseVector::OffsetAt(ObjectData* obj, TypedValue* key) {
+TypedValue* BaseVector::OffsetAt(ObjectData* obj, const TypedValue* key) {
   assert(key->m_type != KindOfRef);
   auto vec = static_cast<BaseVector*>(obj);
   if (key->m_type == KindOfInt64) {
@@ -482,7 +646,7 @@ Variant BaseVector::popFront() {
     memmove(m_data, m_data+1, m_size * sizeof(TypedValue));
     return ret;
   } else {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Cannot pop empty Vector"));
     throw e;
   }
@@ -512,7 +676,8 @@ BaseVector::BaseVector(Class* cls)
  * if it exists.
  */
 BaseVector::~BaseVector() {
-  if (m_immCopy.isNull() && m_data) {
+  if (!hasImmutableBuffer() && m_data) {
+    assert(m_immCopy.isNull());
     for (uint i = 0; i < m_size; ++i) {
       tvRefcountedDecRef(&m_data[i]);
     }
@@ -530,7 +695,7 @@ void BaseVector::throwBadKeyType() {
   throw e;
 }
 
-void BaseVector::init(CVarRef t) {
+void BaseVector::init(const Variant& t) {
   size_t sz;
   ArrayIter iter = getArrayIterHelper(t, sz);
   if (sz) {
@@ -544,6 +709,14 @@ void BaseVector::init(CVarRef t) {
 }
 
 void BaseVector::cow() {
+  assert(hasImmutableBuffer());
+  if (!m_size) {
+    m_data = nullptr;
+    m_capacity = 0;
+    m_immCopy.reset();
+    return;
+  }
+
   TypedValue* newData =
     (TypedValue*)MM().objMallocLogged(m_capacity * sizeof(TypedValue));
 
@@ -564,7 +737,7 @@ c_Vector::c_Vector(Class* cls /* = c_Vector::classof() */) : BaseVector(cls) {
   o_subclassData.u16 = Collection::VectorType;
 }
 
-void c_Vector::t___construct(CVarRef iterable /* = null_variant */) {
+void c_Vector::t___construct(const Variant& iterable /* = null_variant */) {
   BaseVector::construct(iterable);
 }
 
@@ -593,13 +766,13 @@ void c_Vector::resize(int64_t sz, TypedValue* val) {
   }
 }
 
-Object c_Vector::t_add(CVarRef val) {
+Object c_Vector::t_add(const Variant& val) {
   TypedValue* tv = cvarToCell(&val);
   add(tv);
   return this;
 }
 
-Object c_Vector::t_addall(CVarRef iterable) {
+Object c_Vector::t_addall(const Variant& iterable) {
   if (iterable.isNull()) return this;
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -614,7 +787,7 @@ Object c_Vector::t_addall(CVarRef iterable) {
   return this;
 }
 
-Object c_Vector::t_append(CVarRef val) {
+Object c_Vector::t_append(const Variant& val) {
   TypedValue* tv = cvarToCell(&val);
   add(tv);
   return this;
@@ -629,13 +802,13 @@ Variant c_Vector::t_pop() {
     tvRefcountedDecRef(&m_data[m_size]);
     return ret;
   } else {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Cannot pop empty Vector"));
     throw e;
   }
 }
 
-int64_t c_Vector::checkRequestedCapacity(CVarRef sz) {
+int64_t c_Vector::checkRequestedCapacity(const Variant& sz) {
   if (!sz.isInteger()) {
     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
       "Parameter sz must be a non-negative integer"));
@@ -659,13 +832,13 @@ int64_t c_Vector::checkRequestedCapacity(CVarRef sz) {
   return intSz;
 }
 
-void c_Vector::t_resize(CVarRef sz, CVarRef value) {
+void c_Vector::t_resize(const Variant& sz, const Variant& value) {
   auto intSz = checkRequestedCapacity(sz);
   TypedValue* val = cvarToCell(&value);
   resize(intSz, val);
 }
 
-void c_Vector::t_reserve(CVarRef sz) {
+void c_Vector::t_reserve(const Variant& sz) {
   auto intSz = checkRequestedCapacity(sz);
   reserve(intSz);
 }
@@ -721,23 +894,23 @@ Object c_Vector::t_kvzip() {
   return obj;
 }
 
-Variant c_Vector::t_at(CVarRef key) {
+Variant c_Vector::t_at(const Variant& key) {
   return BaseVector::at(key);
 }
 
-Variant c_Vector::t_get(CVarRef key) {
+Variant c_Vector::t_get(const Variant& key) {
   return BaseVector::get(key);
 }
 
-bool c_Vector::t_contains(CVarRef key) {
+bool c_Vector::t_contains(const Variant& key) {
   return t_containskey(key);
 }
 
-bool c_Vector::t_containskey(CVarRef key) {
+bool c_Vector::t_containskey(const Variant& key) {
   return BaseVector::containskey(key);
 }
 
-Object c_Vector::t_removekey(CVarRef key) {
+Object c_Vector::t_removekey(const Variant& key) {
   if (!key.isInteger()) {
     throwBadKeyType();
   }
@@ -780,8 +953,8 @@ void c_Vector::t_reverse() {
   }
 }
 
-void c_Vector::t_splice(CVarRef offset, CVarRef len /* = null */,
-                        CVarRef replacement /* = null */) {
+void c_Vector::t_splice(const Variant& offset, const Variant& len /* = null */,
+                        const Variant& replacement /* = null */) {
   if (!offset.isInteger()) {
     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
       "Parameter offset must be an integer"));
@@ -793,7 +966,7 @@ void c_Vector::t_splice(CVarRef offset, CVarRef len /* = null */,
     throw e;
   }
   if (!replacement.isNull()) {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Vector::splice does not support replacement parameter"));
     throw e;
   }
@@ -845,7 +1018,7 @@ void c_Vector::t_splice(CVarRef offset, CVarRef len /* = null */,
   m_size -= (endPos - startPos);
 }
 
-int64_t c_Vector::t_linearsearch(CVarRef search_value) {
+int64_t c_Vector::t_linearsearch(const Variant& search_value) {
   return BaseVector::linearsearch(search_value);
 }
 
@@ -861,34 +1034,66 @@ Object c_Vector::t_getiterator() {
   return BaseVector::getiterator();
 }
 
-Object c_Vector::t_map(CVarRef callback) {
+Object c_Vector::t_map(const Variant& callback) {
   return BaseVector::php_map<c_Vector>(
     callback, &makeArgsFromVectorValue);
 }
 
-Object c_Vector::t_mapwithkey(CVarRef callback) {
+Object c_Vector::t_mapwithkey(const Variant& callback) {
   return BaseVector::php_map<c_Vector>(
     callback, &makeArgsFromVectorKeyAndValue);
 }
 
-Object c_Vector::t_filter(CVarRef callback) {
+Object c_Vector::t_filter(const Variant& callback) {
   return BaseVector::php_filter<c_Vector>(
     callback, &makeArgsFromVectorValue);
 }
 
-Object c_Vector::t_filterwithkey(CVarRef callback) {
+Object c_Vector::t_filterwithkey(const Variant& callback) {
   return BaseVector::php_filter<c_Vector>(
     callback, &makeArgsFromVectorKeyAndValue);
 }
 
-Object c_Vector::t_zip(CVarRef iterable) {
+Object c_Vector::t_zip(const Variant& iterable) {
   auto* vec = NEWOBJ(c_Vector);
   Object obj = vec;
   BaseVector::zip(vec, iterable);
   return obj;
 }
 
-Object c_Vector::t_set(CVarRef key, CVarRef value) {
+Object c_Vector::t_take(const Variant& n) {
+  return BaseVector::php_take<c_Vector>(n);
+}
+
+Object c_ImmVector::t_take(const Variant& n) {
+  return BaseVector::php_take<c_ImmVector>(n);
+}
+
+Object c_Vector::t_takewhile(const Variant& fn) {
+  return BaseVector::php_takeWhile<c_Vector, true>(fn);
+}
+
+Object c_ImmVector::t_takewhile(const Variant& fn) {
+  return BaseVector::php_takeWhile<c_ImmVector, false>(fn);
+}
+
+Object c_Vector::t_skip(const Variant& n) {
+  return BaseVector::php_skip<c_Vector>(n);
+}
+
+Object c_ImmVector::t_skip(const Variant& n) {
+  return BaseVector::php_skip<c_ImmVector>(n);
+}
+
+Object c_Vector::t_skipwhile(const Variant& fn) {
+  return BaseVector::php_skipWhile<c_Vector, true>(fn);
+}
+
+Object c_ImmVector::t_skipwhile(const Variant& fn) {
+  return BaseVector::php_skipWhile<c_ImmVector, false>(fn);
+}
+
+Object c_Vector::t_set(const Variant& key, const Variant& value) {
   if (key.isInteger()) {
     TypedValue* tv = cvarToCell(&value);
     set(key.toInt64(), tv);
@@ -898,7 +1103,7 @@ Object c_Vector::t_set(CVarRef key, CVarRef value) {
   return this;
 }
 
-Object c_Vector::t_setall(CVarRef iterable) {
+Object c_Vector::t_setall(const Variant& iterable) {
   if (iterable.isNull()) return this;
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -915,7 +1120,7 @@ Object c_Vector::t_setall(CVarRef iterable) {
   return this;
 }
 
-Object c_Vector::ti_fromitems(CVarRef iterable) {
+Object c_Vector::ti_fromitems(const Variant& iterable) {
   if (iterable.isNull()) return NEWOBJ(c_Vector)();
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -929,7 +1134,7 @@ Object c_Vector::ti_fromitems(CVarRef iterable) {
   return ret;
 }
 
-Object c_Vector::ti_fromarray(CVarRef arr) {
+Object c_Vector::ti_fromarray(const Variant& arr) {
   if (!arr.isArray()) {
     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
       "Parameter arr must be an array"));
@@ -952,11 +1157,6 @@ Object c_Vector::ti_fromarray(CVarRef arr) {
     cellDup(*cvarToCell(&ad->getValueRef(pos)), data[i]);
   }
   return ret;
-}
-
-Object c_Vector::ti_slice(CVarRef vec, CVarRef offset,
-                          CVarRef len /* = null */) {
-  return BaseVector::slice<c_Vector>("Vector", vec, offset, len);
 }
 
 void c_Vector::throwOOB(int64_t key) {
@@ -1035,7 +1235,7 @@ void c_Vector::sort(int sort_flags, bool ascending) {
 #undef SORT_CASE_BLOCK
 #undef CALL_SORT
 
-bool c_Vector::usort(CVarRef cmp_function) {
+bool c_Vector::usort(const Variant& cmp_function) {
   if (!m_size) {
     return true;
   }
@@ -1051,7 +1251,8 @@ bool c_Vector::usort(CVarRef cmp_function) {
   return true;
 }
 
-void c_Vector::OffsetSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
+void c_Vector::OffsetSet(ObjectData* obj, const TypedValue* key,
+                         TypedValue* val) {
   assert(key->m_type != KindOfRef);
   assert(val->m_type != KindOfRef);
   auto vec = static_cast<c_Vector*>(obj);
@@ -1062,7 +1263,7 @@ void c_Vector::OffsetSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
   throwBadKeyType();
 }
 
-void c_Vector::OffsetUnset(ObjectData* obj, TypedValue* key) {
+void c_Vector::OffsetUnset(ObjectData* obj, const TypedValue* key) {
   Object e(SystemLib::AllocRuntimeExceptionObject(
     "Cannot unset an element of a Vector"));
   throw e;
@@ -1071,7 +1272,8 @@ void c_Vector::OffsetUnset(ObjectData* obj, TypedValue* key) {
 // This function will create a immutable copy of this Vector (if it doesn't
 // already exist) and then return it
 Object c_Vector::getImmutableCopy() {
-  if (m_immCopy.isNull()) {
+  if (!hasImmutableBuffer()) {
+    assert(m_immCopy.isNull());
     auto* vec = NEWOBJ(c_ImmVector)();
     m_immCopy = vec;
     vec->m_data = m_data;
@@ -1172,15 +1374,15 @@ Object c_ImmVector::t_items() {
 
 // ConstIndexAccess
 
-bool c_ImmVector::t_containskey(CVarRef key) {
+bool c_ImmVector::t_containskey(const Variant& key) {
   return BaseVector::containskey(key);
 }
 
-Variant c_ImmVector::t_at(CVarRef key) {
+Variant c_ImmVector::t_at(const Variant& key) {
   return BaseVector::at(key);
 }
 
-Variant c_ImmVector::t_get(CVarRef key) {
+Variant c_ImmVector::t_get(const Variant& key) {
   return BaseVector::get(key);
 }
 
@@ -1190,23 +1392,23 @@ Object c_ImmVector::t_getiterator() {
   return BaseVector::getiterator();
 }
 
-Object c_ImmVector::t_map(CVarRef callback) {
+Object c_ImmVector::t_map(const Variant& callback) {
   return php_map<c_ImmVector>(callback, &makeArgsFromVectorValue);
 }
 
-Object c_ImmVector::t_mapwithkey(CVarRef callback) {
+Object c_ImmVector::t_mapwithkey(const Variant& callback) {
   return php_map<c_ImmVector>(callback, &makeArgsFromVectorKeyAndValue);
 }
 
-Object c_ImmVector::t_filter(CVarRef callback) {
+Object c_ImmVector::t_filter(const Variant& callback) {
   return php_filter<c_ImmVector>(callback, &makeArgsFromVectorValue);
 }
 
-Object c_ImmVector::t_filterwithkey(CVarRef callback) {
+Object c_ImmVector::t_filterwithkey(const Variant& callback) {
   return php_filter<c_ImmVector>(callback, &makeArgsFromVectorKeyAndValue);
 }
 
-Object c_ImmVector::t_zip(CVarRef iterable) {
+Object c_ImmVector::t_zip(const Variant& iterable) {
   auto* vec = NEWOBJ(c_ImmVector);
   Object obj = vec;
   BaseVector::zip(vec, iterable);
@@ -1227,14 +1429,9 @@ Object c_ImmVector::t_keys() {
   return obj;
 }
 
-Object c_ImmVector::ti_slice(CVarRef vec, CVarRef offset,
-                                CVarRef len /* = null */) {
-  return BaseVector::slice<c_ImmVector>("ImmVector", vec, offset, len);
-}
-
 // Others
 
-void c_ImmVector::t___construct(CVarRef iterable /* = null_variant */) {
+void c_ImmVector::t___construct(const Variant& iterable /* = null_variant */) {
   BaseVector::construct(iterable);
 }
 
@@ -1254,7 +1451,7 @@ Array c_ImmVector::t_tovaluesarray() {
   return BaseVector::tovaluesarray();
 }
 
-int64_t c_ImmVector::t_linearsearch(CVarRef search_value) {
+int64_t c_ImmVector::t_linearsearch(const Variant& search_value) {
   return BaseVector::linearsearch(search_value);
 }
 
@@ -1318,12 +1515,12 @@ void BaseMap::deleteElms() {
   }
 }
 
-void BaseMap::php_construct(CVarRef iterable /* = null_variant */) {
+void BaseMap::php_construct(const Variant& iterable /* = null_variant */) {
   if (iterable.isNull()) return;
   init(iterable);
 }
 
-void c_Map::t___construct(CVarRef iterable /* = null_variant */) {
+void c_Map::t___construct(const Variant& iterable /* = null_variant */) {
   return php_construct(iterable);
 }
 
@@ -1383,7 +1580,7 @@ c_Map* c_Map::Clone(ObjectData* obj) {
   return BaseMap::Clone<c_Map>(obj);
 }
 
-void BaseMap::init(CVarRef t) {
+void BaseMap::init(const Variant& t) {
   size_t sz;
   ArrayIter iter = getArrayIterHelper(t, sz);
   if (sz) {
@@ -1403,15 +1600,15 @@ void BaseMap::init(CVarRef t) {
   }
 }
 
-Object BaseMap::php_add(CVarRef val) {
+Object BaseMap::php_add(const Variant& val) {
   TypedValue* tv = cvarToCell(&val);
   add(tv);
   return this;
 }
 
-Object c_Map::t_add(CVarRef val) { return php_add(val); }
+Object c_Map::t_add(const Variant& val) { return php_add(val); }
 
-Object BaseMap::php_addAll(CVarRef iterable) {
+Object BaseMap::php_addAll(const Variant& iterable) {
   if (iterable.isNull()) return this;
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -1424,7 +1621,7 @@ Object BaseMap::php_addAll(CVarRef iterable) {
   return this;
 }
 
-Object c_Map::t_addall(CVarRef val) { return php_addAll(val); }
+Object c_Map::t_addall(const Variant& val) { return php_addAll(val); }
 
 Object BaseMap::php_clear() {
   deleteElms();
@@ -1525,7 +1722,7 @@ Object c_ImmMap::t_kvzip() { return php_kvzip(); }
 
 Object c_Map::t_kvzip() { return php_kvzip(); }
 
-Variant BaseMap::php_at(CVarRef key) const {
+Variant BaseMap::php_at(const Variant& key) const {
   if (key.isInteger()) {
     return tvAsCVarRef(at(key.toInt64()));
   } else if (key.isString()) {
@@ -1535,11 +1732,11 @@ Variant BaseMap::php_at(CVarRef key) const {
   return uninit_null();
 }
 
-Variant c_ImmMap::t_at(CVarRef key) { return php_at(key); }
+Variant c_ImmMap::t_at(const Variant& key) { return php_at(key); }
 
-Variant c_Map::t_at(CVarRef key) { return php_at(key); }
+Variant c_Map::t_at(const Variant& key) { return php_at(key); }
 
-Variant BaseMap::php_get(CVarRef key) const {
+Variant BaseMap::php_get(const Variant& key) const {
   if (key.isInteger()) {
     TypedValue* tv = get(key.toInt64());
     if (tv) {
@@ -1559,11 +1756,11 @@ Variant BaseMap::php_get(CVarRef key) const {
   return uninit_null();
 }
 
-Variant c_ImmMap::t_get(CVarRef key) { return php_get(key); }
+Variant c_ImmMap::t_get(const Variant& key) { return php_get(key); }
 
-Variant c_Map::t_get(CVarRef key) { return php_get(key); }
+Variant c_Map::t_get(const Variant& key) { return php_get(key); }
 
-Object BaseMap::php_set(CVarRef key, CVarRef value) {
+Object BaseMap::php_set(const Variant& key, const Variant& value) {
   TypedValue* val = cvarToCell(&value);
   if (key.isInteger()) {
     update(key.toInt64(), val);
@@ -1575,11 +1772,11 @@ Object BaseMap::php_set(CVarRef key, CVarRef value) {
   return this;
 }
 
-Object c_Map::t_set(CVarRef key, CVarRef value) {
+Object c_Map::t_set(const Variant& key, const Variant& value) {
   return php_set(key, value);
 }
 
-Object BaseMap::php_setAll(CVarRef iterable) {
+Object BaseMap::php_setAll(const Variant& iterable) {
   if (iterable.isNull()) return this;
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -1599,9 +1796,9 @@ Object BaseMap::php_setAll(CVarRef iterable) {
   return this;
 }
 
-Object c_Map::t_setall(CVarRef iterable) { return php_setAll(iterable); }
+Object c_Map::t_setall(const Variant& iterable) { return php_setAll(iterable); }
 
-bool BaseMap::php_contains(CVarRef key) const {
+bool BaseMap::php_contains(const Variant& key) const {
   DataType t = key.getType();
   if (t == KindOfInt64) {
     return contains(key.toInt64());
@@ -1613,15 +1810,15 @@ bool BaseMap::php_contains(CVarRef key) const {
   return false;
 }
 
-bool c_ImmMap::t_contains(CVarRef key) { return php_contains(key); }
+bool c_ImmMap::t_contains(const Variant& key) { return php_contains(key); }
 
-bool c_Map::t_contains(CVarRef key) { return php_contains(key); }
+bool c_Map::t_contains(const Variant& key) { return php_contains(key); }
 
-bool c_ImmMap::t_containskey(CVarRef key) { return php_contains(key); }
+bool c_ImmMap::t_containskey(const Variant& key) { return php_contains(key); }
 
-bool c_Map::t_containskey(CVarRef key) { return php_contains(key); }
+bool c_Map::t_containskey(const Variant& key) { return php_contains(key); }
 
-Object BaseMap::php_remove(CVarRef key) {
+Object BaseMap::php_remove(const Variant& key) {
   DataType t = key.getType();
   if (t == KindOfInt64) {
     remove(key.toInt64());
@@ -1633,9 +1830,9 @@ Object BaseMap::php_remove(CVarRef key) {
   return this;
 }
 
-Object c_Map::t_remove(CVarRef key) { return php_remove(key); }
+Object c_Map::t_remove(const Variant& key) { return php_remove(key); }
 
-Object c_Map::t_removekey(CVarRef key) { return php_remove(key); }
+Object c_Map::t_removekey(const Variant& key) { return php_remove(key); }
 
 Array c_ImmMap::t_toarray() { return php_toArray(); }
 
@@ -1702,7 +1899,7 @@ Array c_Map::t_tovaluesarray() { return php_toValuesArray(); }
 template<typename TMap>
 typename std::enable_if<
   std::is_base_of<BaseMap, TMap>::value, Object>::type
-BaseMap::php_differenceByKey(CVarRef it) {
+BaseMap::php_differenceByKey(const Variant& it) {
   if (!it.isObject()) {
     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
                "Parameter it must be an instance of Iterable"));
@@ -1724,7 +1921,7 @@ BaseMap::php_differenceByKey(CVarRef it) {
     }
     return ret;
   }
-  for (ArrayIter iter = obj->begin(); iter; ++iter) {
+  for (ArrayIter iter(obj); iter; ++iter) {
     Variant k = iter.first();
     if (k.isInteger()) {
       target->remove(k.toInt64());
@@ -1736,11 +1933,11 @@ BaseMap::php_differenceByKey(CVarRef it) {
   return ret;
 }
 
-Object c_ImmMap::t_differencebykey(CVarRef it) {
+Object c_ImmMap::t_differencebykey(const Variant& it) {
   return php_differenceByKey<c_ImmMap>(it);
 }
 
-Object c_Map::t_differencebykey(CVarRef it) {
+Object c_Map::t_differencebykey(const Variant& it) {
   return php_differenceByKey<c_Map>(it);
 }
 
@@ -1788,7 +1985,7 @@ static std::array<TypedValue, 1> makeArgsFromMapValue(BaseMap::Elm& e) {
 template<typename TMap, class MakeArgs>
 typename std::enable_if<
   std::is_base_of<BaseMap, TMap>::value, Object>::type
-BaseMap::php_map(CVarRef callback, MakeArgs makeArgs) const {
+BaseMap::php_map(const Variant& callback, MakeArgs makeArgs) const {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -1836,26 +2033,26 @@ BaseMap::php_map(CVarRef callback, MakeArgs makeArgs) const {
   return obj;
 }
 
-Object c_ImmMap::t_map(CVarRef callback) {
+Object c_ImmMap::t_map(const Variant& callback) {
   return php_map<c_ImmMap>(callback, &makeArgsFromMapValue);
 }
 
-Object c_Map::t_map(CVarRef callback) {
+Object c_Map::t_map(const Variant& callback) {
   return php_map<c_Map>(callback, &makeArgsFromMapValue);
 }
 
-Object c_ImmMap::t_mapwithkey(CVarRef callback) {
+Object c_ImmMap::t_mapwithkey(const Variant& callback) {
   return php_map<c_ImmMap>(callback, &makeArgsFromMapKeyAndValue);
 }
 
-Object c_Map::t_mapwithkey(CVarRef callback) {
+Object c_Map::t_mapwithkey(const Variant& callback) {
   return php_map<c_Map>(callback, &makeArgsFromMapKeyAndValue);
 }
 
 template<typename TMap, class MakeArgs>
 typename std::enable_if<
   std::is_base_of<BaseMap, TMap>::value, Object>::type
-BaseMap::php_filter(CVarRef callback, MakeArgs makeArgs) const {
+BaseMap::php_filter(const Variant& callback, MakeArgs makeArgs) const {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -1889,24 +2086,24 @@ BaseMap::php_filter(CVarRef callback, MakeArgs makeArgs) const {
   return obj;
 }
 
-Object c_ImmMap::t_filter(CVarRef callback) {
+Object c_ImmMap::t_filter(const Variant& callback) {
   return php_filter<c_ImmMap>(callback, &makeArgsFromMapValue);
 }
 
-Object c_Map::t_filter(CVarRef callback) {
+Object c_Map::t_filter(const Variant& callback) {
   return php_filter<c_Map>(callback, &makeArgsFromMapValue);
 }
 
-Object c_ImmMap::t_filterwithkey(CVarRef callback) {
+Object c_ImmMap::t_filterwithkey(const Variant& callback) {
   return php_filter<c_ImmMap>(callback, &makeArgsFromMapKeyAndValue);
 }
 
-Object c_Map::t_filterwithkey(CVarRef callback) {
+Object c_Map::t_filterwithkey(const Variant& callback) {
   return php_filter<c_Map>(callback, &makeArgsFromMapKeyAndValue);
 }
 
 template<class MakeArgs>
-Object BaseMap::php_retain(CVarRef callback, MakeArgs makeArgs) {
+Object BaseMap::php_retain(const Variant& callback, MakeArgs makeArgs) {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -1945,18 +2142,18 @@ Object BaseMap::php_retain(CVarRef callback, MakeArgs makeArgs) {
   return this;
 }
 
-Object c_Map::t_retain(CVarRef callback) {
+Object c_Map::t_retain(const Variant& callback) {
   return php_retain(callback, &makeArgsFromMapValue);
 }
 
-Object c_Map::t_retainwithkey(CVarRef callback) {
+Object c_Map::t_retainwithkey(const Variant& callback) {
   return php_retain(callback, &makeArgsFromMapKeyAndValue);
 }
 
 template<typename TMap>
 typename std::enable_if<
   std::is_base_of<BaseMap, TMap>::value, Object>::type
-BaseMap::php_zip(CVarRef iterable) const {
+BaseMap::php_zip(const Variant& iterable) const {
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   TMap* mp;
@@ -1987,18 +2184,237 @@ BaseMap::php_zip(CVarRef iterable) const {
   return obj;
 }
 
-Object c_ImmMap::t_zip(CVarRef iterable) {
+Object c_ImmMap::t_zip(const Variant& iterable) {
   return php_zip<c_ImmMap>(iterable);
 }
 
-Object c_Map::t_zip(CVarRef iterable) {
+Object c_Map::t_zip(const Variant& iterable) {
   return php_zip<c_Map>(iterable);
+}
+
+template<class TMap>
+typename std::enable_if<
+  std::is_base_of<BaseMap, TMap>::value, Object>::type
+BaseMap::php_take(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  if (len >= int64_t(m_size)) {
+    // We know the resulting Map will simply be a copy of this Map,
+    // so we can just call Clone() and return early here.
+    return Object::attach(TMap::Clone(this));
+  }
+  auto* mp = NEWOBJ(TMap)();
+  Object obj = mp;
+  if (len <= 0) {
+    // We know the resulting Map will be empty, so we can return
+    // early here.
+    return obj;
+  }
+  size_t sz = size_t(len);
+  mp->reserve(sz);
+  mp->m_size = mp->m_used = sz;
+  auto table = mp->hashTab();
+  auto mask = mp->m_tableMask;
+  for (uint32_t frPos = 0, toPos = 0; toPos < sz; ++toPos, ++frPos) {
+    while (isTombstone(m_data[frPos].data.m_type)) {
+      assert(frPos + 1 < m_used);
+      ++frPos;
+    }
+    auto& toE = mp->m_data[toPos];
+    toE.skey = m_data[frPos].skey;
+    toE.data.hash() = m_data[frPos].data.hash();
+    if (toE.hasStrKey()) toE.skey->incRefCount();
+    cellDup(m_data[frPos].data, toE.data);
+    auto ie = findForNewInsert(table, mask,
+                               toE.hasIntKey() ? toE.ikey : toE.hash());
+    *ie = toPos;
+  }
+  return obj;
+}
+
+template<class TMap, bool checkVersion>
+typename std::enable_if<
+  std::is_base_of<BaseMap, TMap>::value, Object>::type
+BaseMap::php_takeWhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* mp = NEWOBJ(TMap)();
+  Object obj = mp;
+  if (!m_size) return obj;
+  uint32_t used = iterLimit();
+  for (uint i = 0; i < used; ++i) {
+    if (isTombstone(i)) continue;
+    Elm& p = data()[i];
+    Variant ret;
+    if (checkVersion) {
+      int32_t version = m_version;
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+      if (UNLIKELY(version != m_version)) {
+        throw_collection_modified();
+      }
+    } else {
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+    }
+    if (!ret.toBoolean()) continue;
+    if (p.hasIntKey()) {
+      mp->update(p.ikey, &p.data);
+    } else {
+      mp->update(p.skey, &p.data);
+    }
+  }
+  return obj;
+}
+
+template<class TMap>
+typename std::enable_if<
+  std::is_base_of<BaseMap, TMap>::value, Object>::type
+BaseMap::php_skip(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  if (len <= 0) {
+    // We know the resulting Map will simply be a copy of this Map,
+    // so we can just call Clone() and return early here.
+    return Object::attach(TMap::Clone(this));
+  }
+  auto* mp = NEWOBJ(TMap)();
+  Object obj = mp;
+  if (len >= m_size) {
+    // We know the resulting Map will be empty, so we can return
+    // early here.
+    return obj;
+  }
+  size_t sz = size_t(m_size) - size_t(len);
+  assert(sz);
+  mp->reserve(sz);
+  mp->m_size = mp->m_used = sz;
+  uint32_t frPos;
+  if (LIKELY(!hasTombstones())) {
+    // Fast path: Map contains no tombstones
+    frPos = len;
+  } else {
+    // Slow path: Map has at least one tombstone, so we need to
+    // count forward
+    frPos = 0;
+    while (len > 0) {
+      while (isTombstone(m_data[frPos].data.m_type)) {
+        assert(frPos + 1 < m_used);
+        ++frPos;
+      }
+      --len;
+      ++frPos;
+    }
+  }
+  auto table = mp->hashTab();
+  auto mask = mp->m_tableMask;
+  for (uint32_t toPos = 0; toPos < sz; ++toPos, ++frPos) {
+    while (isTombstone(m_data[frPos].data.m_type)) {
+      assert(frPos + 1 < m_used);
+      ++frPos;
+    }
+    auto& toE = mp->m_data[toPos];
+    toE.skey = m_data[frPos].skey;
+    toE.data.hash() = m_data[frPos].data.hash();
+    if (toE.hasStrKey()) toE.skey->incRefCount();
+    cellDup(m_data[frPos].data, toE.data);
+    auto ie = findForNewInsert(table, mask,
+                               toE.hasIntKey() ? toE.ikey : toE.hash());
+    *ie = toPos;
+  }
+  return obj;
+}
+
+template<class TMap, bool checkVersion>
+typename std::enable_if<
+  std::is_base_of<BaseMap, TMap>::value, Object>::type
+BaseMap::php_skipWhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* mp = NEWOBJ(TMap)();
+  Object obj = mp;
+  if (!m_size) return obj;
+  uint32_t used = iterLimit();
+  uint i = 0;
+  for (; i < used; ++i) {
+    if (isTombstone(i)) continue;
+    Elm& p = data()[i];
+    Variant ret;
+    if (checkVersion) {
+      int32_t version = m_version;
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+      if (UNLIKELY(version != m_version)) {
+        throw_collection_modified();
+      }
+    } else {
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+    }
+    if (!ret.toBoolean()) break;
+  }
+  for (; i < used; ++i) {
+    if (isTombstone(i)) continue;
+    Elm& p = data()[i];
+    if (p.hasIntKey()) {
+      mp->update(p.ikey, &p.data);
+    } else {
+      mp->update(p.skey, &p.data);
+    }
+  }
+  return obj;
+}
+
+Object c_Map::t_take(const Variant& n) {
+  return BaseMap::php_take<c_Map>(n);
+}
+
+Object c_ImmMap::t_take(const Variant& n) {
+  return BaseMap::php_take<c_ImmMap>(n);
+}
+
+Object c_Map::t_takewhile(const Variant& fn) {
+  return BaseMap::php_takeWhile<c_Map, true>(fn);
+}
+
+Object c_ImmMap::t_takewhile(const Variant& fn) {
+  return BaseMap::php_takeWhile<c_ImmMap, false>(fn);
+}
+
+Object c_Map::t_skip(const Variant& n) {
+  return BaseMap::php_skip<c_Map>(n);
+}
+
+Object c_ImmMap::t_skip(const Variant& n) {
+  return BaseMap::php_skip<c_ImmMap>(n);
+}
+
+Object c_Map::t_skipwhile(const Variant& fn) {
+  return BaseMap::php_skipWhile<c_Map, true>(fn);
+}
+
+Object c_ImmMap::t_skipwhile(const Variant& fn) {
+  return BaseMap::php_skipWhile<c_ImmMap, false>(fn);
 }
 
 template<typename TMap>
 typename std::enable_if<
   std::is_base_of<BaseMap, TMap>::value, Object>::type
-BaseMap::php_mapFromIterable(CVarRef iterable) {
+BaseMap::php_mapFromIterable(const Variant& iterable) {
   if (iterable.isNull()) return NEWOBJ(TMap)();
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -2032,18 +2448,18 @@ BaseMap::php_mapFromIterable(CVarRef iterable) {
   return ret;
 }
 
-Object c_ImmMap::ti_fromitems(CVarRef iterable) {
+Object c_ImmMap::ti_fromitems(const Variant& iterable) {
   return php_mapFromIterable<c_ImmMap>(iterable);
 }
 
-Object c_Map::ti_fromitems(CVarRef iterable) {
+Object c_Map::ti_fromitems(const Variant& iterable) {
   return php_mapFromIterable<c_Map>(iterable);
 }
 
 template<typename TMap>
 typename std::enable_if<
   std::is_base_of<BaseMap, TMap>::value, Object>::type
-BaseMap::php_mapFromArray(CVarRef arr) {
+BaseMap::php_mapFromArray(const Variant& arr) {
   if (!arr.isArray()) {
     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
       "Parameter arr must be an array"));
@@ -2066,7 +2482,7 @@ BaseMap::php_mapFromArray(CVarRef arr) {
   return ret;
 }
 
-Object c_Map::ti_fromarray(CVarRef arr) {
+Object c_Map::ti_fromarray(const Variant& arr) {
   return php_mapFromArray<c_Map>(arr);
 }
 
@@ -2214,7 +2630,7 @@ Variant BaseMap::pop() {
     erase(ei);
     return ret;
   } else {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Cannot pop empty Map"));
     throw e;
   }
@@ -2239,7 +2655,7 @@ Variant BaseMap::popFront() {
     erase(ei);
     return ret;
   } else {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Cannot pop empty Map"));
     throw e;
   }
@@ -2614,7 +3030,7 @@ struct MapValAccessor {
 template <typename AccessorT>
 BaseMap::SortFlavor BaseMap::preSort(const AccessorT& acc, bool checkTypes) {
   assert(m_size > 0);
-  if (!checkTypes && m_size == m_used) {
+  if (!checkTypes && !hasTombstones()) {
     // No need to loop over the elements, we're done
     return GenericSort;
   }
@@ -2654,7 +3070,7 @@ BaseMap::SortFlavor BaseMap::preSort(const AccessorT& acc, bool checkTypes) {
   }
   done:
   m_used = start - data();
-  assert(m_size == m_used);
+  assert(!hasTombstones());
   if (checkTypes) {
     return allStrs ? StringSort : allInts ? IntegerSort : GenericSort;
   } else {
@@ -2762,18 +3178,18 @@ void BaseMap::ksort(int sort_flags, bool ascending) {
     return true;                                                \
   } while (0)
 
-bool BaseMap::uasort(CVarRef cmp_function) {
+bool BaseMap::uasort(const Variant& cmp_function) {
   USER_SORT_BODY(MapValAccessor);
 }
 
-bool BaseMap::uksort(CVarRef cmp_function) {
+bool BaseMap::uksort(const Variant& cmp_function) {
   USER_SORT_BODY(MapKeyAccessor);
 }
 
 #undef USER_SORT_BODY
 
 template <bool throwOnMiss>
-TypedValue* BaseMap::OffsetAt(ObjectData* obj, TypedValue* key) {
+TypedValue* BaseMap::OffsetAt(ObjectData* obj, const TypedValue* key) {
   assert(key->m_type != KindOfRef);
   auto mp = static_cast<BaseMap*>(obj);
   if (key->m_type == KindOfInt64) {
@@ -2788,7 +3204,8 @@ TypedValue* BaseMap::OffsetAt(ObjectData* obj, TypedValue* key) {
   return nullptr;
 }
 
-void BaseMap::OffsetSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
+void BaseMap::OffsetSet(ObjectData* obj, const TypedValue* key,
+                        TypedValue* val) {
   assert(key->m_type != KindOfRef);
   assert(val->m_type != KindOfRef);
   auto mp = static_cast<BaseMap*>(obj);
@@ -2846,7 +3263,7 @@ bool BaseMap::OffsetContains(ObjectData* obj, TypedValue* key) {
   }
 }
 
-void BaseMap::OffsetUnset(ObjectData* obj, TypedValue* key) {
+void BaseMap::OffsetUnset(ObjectData* obj, const TypedValue* key) {
   assert(key->m_type != KindOfRef);
   auto mp = static_cast<BaseMap*>(obj);
   if (key->m_type == KindOfInt64) {
@@ -3034,7 +3451,7 @@ c_ImmMap::c_ImmMap(Class* cb) : BaseMap(cb) {
   o_subclassData.u16 = Collection::ImmMapType;
 }
 
-void c_ImmMap::t___construct(CVarRef iterable /* = null_variant */) {
+void c_ImmMap::t___construct(const Variant& iterable /* = null_variant */) {
   php_construct(iterable);
 }
 
@@ -3047,7 +3464,7 @@ c_ImmMap* c_ImmMap::Clone(ObjectData* obj) {
 
 // Public
 
-void BaseSet::init(CVarRef t) {
+void BaseSet::init(const Variant& t) {
   size_t sz;
   ArrayIter iter = getArrayIterHelper(t, sz);
   for (; iter; ++iter) {
@@ -3174,7 +3591,7 @@ Variant BaseSet::pop() {
     erase(ei);
     return ret;
   } else {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Cannot pop empty Set"));
     throw e;
   }
@@ -3199,7 +3616,7 @@ Variant BaseSet::popFront() {
     erase(ei);
     return ret;
   } else {
-    Object e(SystemLib::AllocRuntimeExceptionObject(
+    Object e(SystemLib::AllocInvalidOperationExceptionObject(
       "Cannot pop empty Set"));
     throw e;
   }
@@ -3214,7 +3631,7 @@ void BaseSet::throwOOB(StringData* val) {
 }
 
 void BaseSet::throwNoIndexAccess() {
-  Object e(SystemLib::AllocRuntimeExceptionObject(
+  Object e(SystemLib::AllocInvalidOperationExceptionObject(
     "[] operator not supported for accessing elements of Sets"));
   throw e;
 }
@@ -3326,30 +3743,6 @@ bool BaseSet::ToBool(const ObjectData* obj) {
   return static_cast<const BaseSet*>(obj)->toBoolImpl();
 }
 
-TypedValue* BaseSet::OffsetAt(ObjectData* obj, TypedValue* key) {
-  BaseSet::throwNoIndexAccess();
-}
-
-void BaseSet::OffsetSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
-  BaseSet::throwNoIndexAccess();
-}
-
-bool BaseSet::OffsetIsset(ObjectData* obj, TypedValue* key) {
-  BaseSet::throwNoIndexAccess();
-}
-
-bool BaseSet::OffsetEmpty(ObjectData* obj, TypedValue* key) {
-  BaseSet::throwNoIndexAccess();
-}
-
-bool BaseSet::OffsetContains(ObjectData* obj, TypedValue* key) {
-  BaseSet::throwNoIndexAccess();
-}
-
-void BaseSet::OffsetUnset(ObjectData* obj, TypedValue* key) {
-  BaseSet::throwNoIndexAccess();
-}
-
 bool BaseSet::Equals(const ObjectData* obj1, const ObjectData* obj2) {
   auto st1 = static_cast<const BaseSet*>(obj1);
   auto st2 = static_cast<const BaseSet*>(obj2);
@@ -3456,12 +3849,12 @@ BaseSet::Clone(ObjectData* obj) {
 
 // Protected (PHP-accesible methods)
 
-void BaseSet::php_construct(CVarRef iterable /* = null_variant */) {
+void BaseSet::php_construct(const Variant& iterable /* = null_variant */) {
   if (iterable.isNull()) return;
   init(iterable);
 }
 
-Object BaseSet::php_addAll(CVarRef iterable) {
+Object BaseSet::php_addAll(const Variant& iterable) {
   if (iterable.isNull()) return this;
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -3490,7 +3883,7 @@ Object BaseSet::php_clear() {
   return this;
 }
 
-bool BaseSet::php_contains(CVarRef key) {
+bool BaseSet::php_contains(const Variant& key) {
   DataType t = key.getType();
   if (t == KindOfInt64) {
     return contains(key.toInt64());
@@ -3502,7 +3895,7 @@ bool BaseSet::php_contains(CVarRef key) {
   return false;
 }
 
-Object BaseSet::php_remove(CVarRef key) {
+Object BaseSet::php_remove(const Variant& key) {
   DataType t = key.getType();
   if (t == KindOfInt64) {
     remove(key.toInt64());
@@ -3536,7 +3929,7 @@ Object BaseSet::php_getIterator() {
 template<class TSet>
 typename std::enable_if<
   std::is_base_of<BaseSet, TSet>::value, Object>::type
-BaseSet::php_map(CVarRef callback) {
+BaseSet::php_map(const Variant& callback) {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -3565,7 +3958,7 @@ BaseSet::php_map(CVarRef callback) {
 template<class TSet>
 typename std::enable_if<
   std::is_base_of<BaseSet, TSet>::value, Object>::type
-BaseSet::php_filter(CVarRef callback) {
+BaseSet::php_filter(const Variant& callback) {
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
   if (!ctx.func) {
@@ -3600,7 +3993,7 @@ BaseSet::php_filter(CVarRef callback) {
 template<class TSet>
 typename std::enable_if<
   std::is_base_of<BaseSet, TSet>::value, Object>::type
-BaseSet::php_zip(CVarRef iterable) {
+BaseSet::php_zip(const Variant& iterable) {
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
   if (m_size && iter) {
@@ -3616,7 +4009,192 @@ BaseSet::php_zip(CVarRef iterable) {
 template<class TSet>
 typename std::enable_if<
   std::is_base_of<BaseSet, TSet>::value, Object>::type
-BaseSet::php_fromItems(CVarRef iterable) {
+BaseSet::php_take(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  if (len >= int64_t(m_size)) {
+    // We know the result Set will simply be a copy of this Set,
+    // so we can just call Clone() and return early here.
+    return Object::attach(TSet::Clone(this));
+  }
+  auto* st = NEWOBJ(TSet)();
+  Object obj = st;
+  if (len <= 0) {
+    // We know the resulting Set will be empty, so we can return
+    // early here.
+    return obj;
+  }
+  size_t sz = size_t(len);
+  st->reserve(sz);
+  st->m_size = st->m_used = sz;
+  auto table = st->hashTab();
+  auto mask = st->m_tableMask;
+  for (uint32_t frPos = 0, toPos = 0; toPos < sz; ++toPos, ++frPos) {
+    while (isTombstone(m_data[frPos].data.m_type)) {
+      assert(frPos + 1 < m_used);
+      ++frPos;
+    }
+    auto& toE = st->m_data[toPos];
+    toE.data.hash() = m_data[frPos].data.hash();
+    cellDup(m_data[frPos].data, toE.data);
+    auto ie = findForNewInsert(table, mask,
+            toE.hasInt() ? toE.data.m_data.num : toE.data.m_data.pstr->hash());
+    *ie = toPos;
+  }
+  return obj;
+}
+
+template<class TSet, bool checkVersion>
+typename std::enable_if<
+  std::is_base_of<BaseSet, TSet>::value, Object>::type
+BaseSet::php_takeWhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* st = NEWOBJ(TSet);
+  Object obj = st;
+  if (!m_size) return obj;
+  uint32_t used = iterLimit();
+  for (uint i = 0; i < used; ++i) {
+    if (isTombstone(i)) continue;
+    Elm& p = data()[i];
+    Variant ret;
+    if (checkVersion) {
+      int32_t version = m_version;
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+      if (UNLIKELY(version != m_version)) {
+        throw_collection_modified();
+      }
+    } else {
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+    }
+    if (!ret.toBoolean()) continue;
+    if (p.hasInt()) {
+      st->add(p.data.m_data.num);
+    } else {
+      assert(p.hasStr());
+      st->add(p.data.m_data.pstr);
+    }
+  }
+  return obj;
+}
+
+template<class TSet>
+typename std::enable_if<
+  std::is_base_of<BaseSet, TSet>::value, Object>::type
+BaseSet::php_skip(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  if (len <= 0) {
+    // We know the resulting Set will simply be a copy of this Set,
+    // so we can just call Clone() and return early here.
+    return Object::attach(TSet::Clone(this));
+  }
+  auto* st = NEWOBJ(TSet)();
+  Object obj = st;
+  if (len >= m_size) {
+    // We know the resulting Set will be empty, so we can return
+    // early here.
+    return obj;
+  }
+  size_t sz = size_t(m_size) - size_t(len);
+  assert(sz);
+  st->reserve(sz);
+  st->m_size = st->m_used = sz;
+  uint32_t frPos;
+  if (LIKELY(!hasTombstones())) {
+    // Fast path: Set contains no tombstones
+    frPos = len;
+  } else {
+    // Slow path: Set has at least one tombstone, so we need to
+    // count forward
+    frPos = 0;
+    while (len > 0) {
+      while (isTombstone(m_data[frPos].data.m_type)) {
+        assert(frPos + 1 < m_used);
+        ++frPos;
+      }
+      --len;
+      ++frPos;
+    }
+  }
+  auto table = st->hashTab();
+  auto mask = st->m_tableMask;
+  for (uint32_t toPos = 0; toPos < sz; ++toPos, ++frPos) {
+    while (isTombstone(m_data[frPos].data.m_type)) {
+      assert(frPos + 1 < m_used);
+      ++frPos;
+    }
+    auto& toE = st->m_data[toPos];
+    toE.data.hash() = m_data[frPos].data.hash();
+    cellDup(m_data[frPos].data, toE.data);
+    auto ie = findForNewInsert(table, mask,
+            toE.hasInt() ? toE.data.m_data.num : toE.data.m_data.pstr->hash());
+    *ie = toPos;
+  }
+  return obj;
+}
+
+template<class TSet, bool checkVersion>
+typename std::enable_if<
+  std::is_base_of<BaseSet, TSet>::value, Object>::type
+BaseSet::php_skipWhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* st = NEWOBJ(TSet)();
+  Object obj = st;
+  if (!m_size) return obj;
+  uint32_t used = iterLimit();
+  uint i = 0;
+  for (; i < used; ++i) {
+    if (isTombstone(i)) continue;
+    Elm& p = data()[i];
+    Variant ret;
+    if (checkVersion) {
+      int32_t version = m_version;
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+      if (UNLIKELY(version != m_version)) {
+        throw_collection_modified();
+      }
+    } else {
+      g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &p.data);
+    }
+    if (!ret.toBoolean()) break;
+  }
+  for (; i < used; ++i) {
+    if (isTombstone(i)) continue;
+    Elm& p = data()[i];
+    if (p.hasInt()) {
+      st->add(p.data.m_data.num);
+    } else {
+      assert(p.hasStr());
+      st->add(p.data.m_data.pstr);
+    }
+  }
+  return obj;
+}
+
+template<class TSet>
+typename std::enable_if<
+  std::is_base_of<BaseSet, TSet>::value, Object>::type
+BaseSet::php_fromItems(const Variant& iterable) {
   if (iterable.isNull()) return NEWOBJ(TSet)();
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -3638,7 +4216,7 @@ BaseSet::php_fromItems(CVarRef iterable) {
 template<class TSet>
 typename std::enable_if<
   std::is_base_of<BaseSet, TSet>::value, Object>::type
-BaseSet::php_fromArray(CVarRef arr) {
+BaseSet::php_fromArray(const Variant& arr) {
   if (!arr.isArray()) {
     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
       "Parameter arr must be an array"));
@@ -3649,7 +4227,7 @@ BaseSet::php_fromArray(CVarRef arr) {
   ArrayData* ad = arr.getArrayData();
   for (ssize_t pos = ad->iter_begin(); pos != ArrayData::invalid_index;
        pos = ad->iter_advance(pos)) {
-    CVarRef v = ad->getValueRef(pos);
+    const Variant& v = ad->getValueRef(pos);
     if (v.isInteger()) {
       st->add(v.toInt64());
     } else if (v.isString()) {
@@ -3664,7 +4242,7 @@ BaseSet::php_fromArray(CVarRef arr) {
 template<class TSet>
 typename std::enable_if<
   std::is_base_of<BaseSet, TSet>::value, Object>::type
-BaseSet::php_fromArrays(int _argc, CArrRef _argv /* = null_array */) {
+BaseSet::php_fromArrays(int _argc, const Array& _argv /* = null_array */) {
   TSet* st;
   Object ret = st = NEWOBJ(TSet)();
   for (ArrayIter iter(_argv); iter; ++iter) {
@@ -3970,15 +4548,15 @@ c_Set::c_Set(Class* cls /* = c_Set::classof() */) : BaseSet(cls) {
   o_subclassData.u16 = Collection::SetType;
 }
 
-void c_Set::t___construct(CVarRef iterable /* = null_variant */) {
+void c_Set::t___construct(const Variant& iterable /* = null_variant */) {
   BaseSet::php_construct(iterable);
 }
 
-Object c_Set::t_add(CVarRef val) {
+Object c_Set::t_add(const Variant& val) {
   return BaseSet::php_add(val);
 }
 
-Object c_Set::t_addall(CVarRef iterable) {
+Object c_Set::t_addall(const Variant& iterable) {
   return BaseSet::php_addAll(iterable);
 }
 
@@ -4006,11 +4584,11 @@ Object c_Set::t_lazy() {
   return BaseSet::php_lazy();
 }
 
-bool c_Set::t_contains(CVarRef key) {
+bool c_Set::t_contains(const Variant& key) {
   return BaseSet::php_contains(key);
 }
 
-Object c_Set::t_remove(CVarRef key) {
+Object c_Set::t_remove(const Variant& key) {
   return BaseSet::php_remove(key);
 }
 
@@ -4030,19 +4608,51 @@ Object c_Set::t_getiterator() {
   return BaseSet::php_getIterator();
 }
 
-Object c_Set::t_map(CVarRef callback) {
+Object c_Set::t_map(const Variant& callback) {
   return BaseSet::php_map<c_Set>(callback);
 }
 
-Object c_Set::t_filter(CVarRef callback) {
+Object c_Set::t_filter(const Variant& callback) {
   return BaseSet::php_filter<c_Set>(callback);
 }
 
-Object c_Set::t_zip(CVarRef iterable) {
+Object c_Set::t_zip(const Variant& iterable) {
   return BaseSet::php_zip<c_Set>(iterable);
 }
 
-Object c_Set::t_removeall(CVarRef iterable) {
+Object c_Set::t_take(const Variant& n) {
+  return BaseSet::php_take<c_Set>(n);
+}
+
+Object c_ImmSet::t_take(const Variant& n) {
+  return BaseSet::php_take<c_ImmSet>(n);
+}
+
+Object c_Set::t_takewhile(const Variant& fn) {
+  return BaseSet::php_takeWhile<c_Set, true>(fn);
+}
+
+Object c_ImmSet::t_takewhile(const Variant& fn) {
+  return BaseSet::php_takeWhile<c_ImmSet, false>(fn);
+}
+
+Object c_Set::t_skip(const Variant& n) {
+  return BaseSet::php_skip<c_Set>(n);
+}
+
+Object c_ImmSet::t_skip(const Variant& n) {
+  return BaseSet::php_skip<c_ImmSet>(n);
+}
+
+Object c_Set::t_skipwhile(const Variant& fn) {
+  return BaseSet::php_skipWhile<c_Set, true>(fn);
+}
+
+Object c_ImmSet::t_skipwhile(const Variant& fn) {
+  return BaseSet::php_skipWhile<c_ImmSet, false>(fn);
+}
+
+Object c_Set::t_removeall(const Variant& iterable) {
   if (iterable.isNull()) return this;
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
@@ -4052,19 +4662,19 @@ Object c_Set::t_removeall(CVarRef iterable) {
   return this;
 }
 
-Object c_Set::t_difference(CVarRef iterable) {
+Object c_Set::t_difference(const Variant& iterable) {
   return t_removeall(iterable);
 }
 
-Object c_Set::ti_fromitems(CVarRef iterable) {
+Object c_Set::ti_fromitems(const Variant& iterable) {
   return BaseSet::php_fromItems<c_Set>(iterable);
 }
 
-Object c_Set::ti_fromarray(CVarRef arr) {
+Object c_Set::ti_fromarray(const Variant& arr) {
   return BaseSet::php_fromArray<c_Set>(arr);
 }
 
-Object c_Set::ti_fromarrays(int _argc, CArrRef _argv /* = null_array */) {
+Object c_Set::ti_fromarrays(int _argc, const Array& _argv /* = null_array */) {
   return BaseSet::php_fromArrays<c_Set>(_argc, _argv);
 }
 
@@ -4088,7 +4698,7 @@ Object c_Set::t_immutable() {
 ///////////////////////////////////////////////////////////////////////////////
 // ImmSet
 
-void c_ImmSet::t___construct(CVarRef iterable /* = null_variant */) {
+void c_ImmSet::t___construct(const Variant& iterable /* = null_variant */) {
   BaseSet::php_construct(iterable);
 }
 
@@ -4112,7 +4722,7 @@ Object c_ImmSet::t_lazy() {
   return BaseSet::php_lazy();
 }
 
-bool c_ImmSet::t_contains(CVarRef key) {
+bool c_ImmSet::t_contains(const Variant& key) {
   return BaseSet::php_contains(key);
 }
 
@@ -4132,23 +4742,23 @@ Object c_ImmSet::t_getiterator() {
   return BaseSet::php_getIterator();
 }
 
-Object c_ImmSet::t_map(CVarRef callback) {
+Object c_ImmSet::t_map(const Variant& callback) {
   return BaseSet::php_map<c_ImmSet>(callback);
 }
 
-Object c_ImmSet::t_filter(CVarRef callback) {
+Object c_ImmSet::t_filter(const Variant& callback) {
   return BaseSet::php_filter<c_ImmSet>(callback);
 }
 
-Object c_ImmSet::t_zip(CVarRef iterable) {
+Object c_ImmSet::t_zip(const Variant& iterable) {
   return BaseSet::php_zip<c_ImmSet>(iterable);
 }
 
-Object c_ImmSet::ti_fromitems(CVarRef iterable) {
+Object c_ImmSet::ti_fromitems(const Variant& iterable) {
   return BaseSet::php_fromItems<c_ImmSet>(iterable);
 }
 
-Object c_ImmSet::ti_fromarrays(int _argc, CArrRef _argv) {
+Object c_ImmSet::ti_fromarrays(int _argc, const Array& _argv) {
   return BaseSet::php_fromArrays<c_ImmSet>(_argc, _argv);
 }
 
@@ -4236,7 +4846,7 @@ c_Pair::~c_Pair() {
 }
 
 void c_Pair::t___construct() {
-  Object e(SystemLib::AllocRuntimeExceptionObject(
+  Object e(SystemLib::AllocInvalidOperationExceptionObject(
     "Pairs cannot be created using the new operator"));
   throw e;
 }
@@ -4274,8 +4884,8 @@ Object c_Pair::t_items() {
 
 Object c_Pair::t_keys() {
   assert(isFullyConstructed());
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   vec->reserve(2);
   vec->m_size = 2;
   vec->m_data[0].m_data.num = 0;
@@ -4286,7 +4896,7 @@ Object c_Pair::t_keys() {
 }
 
 Object c_Pair::t_values() {
-  auto* vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
   Object o = vec;
   vec->init(VarNR(this));
   return o;
@@ -4299,8 +4909,8 @@ Object c_Pair::t_lazy() {
 
 Object c_Pair::t_kvzip() {
   assert(isFullyConstructed());
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   vec->reserve(2);
   for (uint i = 0; i < 2; ++i) {
     auto* pair = NEWOBJ(c_Pair)();
@@ -4316,7 +4926,7 @@ Object c_Pair::t_kvzip() {
   return obj;
 }
 
-Variant c_Pair::t_at(CVarRef key) {
+Variant c_Pair::t_at(const Variant& key) {
   assert(isFullyConstructed());
   if (key.isInteger()) {
     return tvAsCVarRef(at(key.toInt64()));
@@ -4325,7 +4935,7 @@ Variant c_Pair::t_at(CVarRef key) {
   return init_null_variant;
 }
 
-Variant c_Pair::t_get(CVarRef key) {
+Variant c_Pair::t_get(const Variant& key) {
   assert(isFullyConstructed());
   if (key.isInteger()) {
     TypedValue* tv = get(key.toInt64());
@@ -4339,7 +4949,7 @@ Variant c_Pair::t_get(CVarRef key) {
   return init_null_variant;
 }
 
-bool c_Pair::t_containskey(CVarRef key) {
+bool c_Pair::t_containskey(const Variant& key) {
   assert(isFullyConstructed());
   if (key.isInteger()) {
     return contains(key.toInt64());
@@ -4374,7 +4984,7 @@ Object c_Pair::t_getiterator() {
   return it;
 }
 
-Object c_Pair::t_map(CVarRef callback) {
+Object c_Pair::t_map(const Variant& callback) {
   assert(isFullyConstructed());
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
@@ -4383,8 +4993,8 @@ Object c_Pair::t_map(CVarRef callback) {
       "Parameter must be a valid callback"));
     throw e;
   }
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   vec->reserve(2);
   for (uint64_t i = 0; i < 2; ++i) {
     g_context->invokeFuncFew(&vec->m_data[i], ctx, 1, &getElms()[i]);
@@ -4393,7 +5003,7 @@ Object c_Pair::t_map(CVarRef callback) {
   return obj;
 }
 
-Object c_Pair::t_mapwithkey(CVarRef callback) {
+Object c_Pair::t_mapwithkey(const Variant& callback) {
   assert(isFullyConstructed());
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
@@ -4402,8 +5012,8 @@ Object c_Pair::t_mapwithkey(CVarRef callback) {
       "Parameter must be a valid callback"));
     throw e;
   }
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   vec->reserve(2);
   for (uint64_t i = 0; i < 2; ++i) {
     TypedValue args[2] = { make_tv<KindOfInt64>(i), getElms()[i] };
@@ -4413,7 +5023,7 @@ Object c_Pair::t_mapwithkey(CVarRef callback) {
   return obj;
 }
 
-Object c_Pair::t_filter(CVarRef callback) {
+Object c_Pair::t_filter(const Variant& callback) {
   assert(isFullyConstructed());
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
@@ -4422,8 +5032,8 @@ Object c_Pair::t_filter(CVarRef callback) {
       "Parameter must be a valid callback"));
     throw e;
   }
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   for (uint64_t i = 0; i < 2; ++i) {
     Variant ret;
     g_context->invokeFuncFew(ret.asTypedValue(), ctx, 1, &getElms()[i]);
@@ -4434,7 +5044,7 @@ Object c_Pair::t_filter(CVarRef callback) {
   return obj;
 }
 
-Object c_Pair::t_filterwithkey(CVarRef callback) {
+Object c_Pair::t_filterwithkey(const Variant& callback) {
   assert(isFullyConstructed());
   CallCtx ctx;
   vm_decode_function(callback, nullptr, false, ctx);
@@ -4443,8 +5053,8 @@ Object c_Pair::t_filterwithkey(CVarRef callback) {
       "Parameter must be a valid callback"));
     throw e;
   }
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   for (uint64_t i = 0; i < 2; ++i) {
     Variant ret;
     TypedValue args[2] = { make_tv<KindOfInt64>(i), getElms()[i] };
@@ -4456,12 +5066,12 @@ Object c_Pair::t_filterwithkey(CVarRef callback) {
   return obj;
 }
 
-Object c_Pair::t_zip(CVarRef iterable) {
+Object c_Pair::t_zip(const Variant& iterable) {
   assert(isFullyConstructed());
   size_t sz;
   ArrayIter iter = getArrayIterHelper(iterable, sz);
-  c_Vector* vec;
-  Object obj = vec = NEWOBJ(c_Vector)();
+  auto* vec = NEWOBJ(c_ImmVector)();
+  Object obj = vec;
   vec->reserve(std::min(sz, size_t(2)));
   for (uint64_t i = 0; i < 2 && iter; ++i, ++iter) {
     Variant v = iter.second();
@@ -4483,6 +5093,88 @@ Object c_Pair::t_immutable() {
   return this;
 }
 
+Object c_Pair::t_take(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  auto* vec = NEWOBJ(c_Vector)();
+  Object obj = vec;
+  if (len <= 0) {
+    return obj;
+  }
+  size_t sz = std::min(size_t(len), size_t(2));
+  vec->reserve(sz);
+  vec->m_size = sz;
+  for (size_t i = 0; i < sz; ++i) {
+    cellDup(getElms()[i], vec->m_data[i]);
+  }
+  return obj;
+}
+
+Object c_Pair::t_takewhile(const Variant& callback) {
+  CallCtx ctx;
+  vm_decode_function(callback, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* vec = NEWOBJ(c_Vector)();
+  Object obj = vec;
+  for (uint i = 0; i < 2; ++i) {
+    Variant retval;
+    g_context->invokeFuncFew(retval.asTypedValue(), ctx, 1, &getElms()[i]);
+    if (!retval.toBoolean()) break;
+    vec->add(&getElms()[i]);
+  }
+  return obj;
+}
+
+Object c_Pair::t_skip(const Variant& n) {
+  if (!n.isInteger()) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+      "Parameter n must be an integer"));
+    throw e;
+  }
+  int64_t len = n.toInt64();
+  auto* vec = NEWOBJ(c_Vector);
+  Object obj = vec;
+  if (len <= 0) len = 0;
+  size_t skipAmt = std::min<size_t>(len, 2);
+  size_t sz = size_t(m_size) - skipAmt;
+  vec->reserve(sz);
+  vec->m_size = sz;
+  for (size_t i = 0; i < sz; ++i) {
+    cellDup(getElms()[i + skipAmt], vec->m_data[i]);
+  }
+  return obj;
+}
+
+Object c_Pair::t_skipwhile(const Variant& fn) {
+  CallCtx ctx;
+  vm_decode_function(fn, nullptr, false, ctx);
+  if (!ctx.func) {
+    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
+               "Parameter must be a valid callback"));
+    throw e;
+  }
+  auto* vec = NEWOBJ(c_Vector)();
+  Object obj = vec;
+  uint i = 0;
+  for (; i < 2; ++i) {
+    Variant retval;
+    g_context->invokeFuncFew(retval.asTypedValue(), ctx, 1, &getElms()[i]);
+    if (!retval.toBoolean()) break;
+  }
+  for (; i < 2; ++i) {
+    vec->add(&getElms()[i]);
+  }
+  return obj;
+}
+
 void c_Pair::throwOOB(int64_t key) {
   throwIntOOB(key, true);
 }
@@ -4501,7 +5193,7 @@ Array c_Pair::ToArray(const ObjectData* obj) {
 }
 
 template <bool throwOnMiss>
-TypedValue* c_Pair::OffsetAt(ObjectData* obj, TypedValue* key) {
+TypedValue* c_Pair::OffsetAt(ObjectData* obj, const TypedValue* key) {
   assert(key->m_type != KindOfRef);
   auto pair = static_cast<c_Pair*>(obj);
   assert(pair->isFullyConstructed());
@@ -4511,13 +5203,6 @@ TypedValue* c_Pair::OffsetAt(ObjectData* obj, TypedValue* key) {
   }
   throwBadKeyType();
   return nullptr;
-}
-
-void c_Pair::OffsetSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
-  assert(static_cast<c_Pair*>(obj)->isFullyConstructed());
-  Object e(SystemLib::AllocRuntimeExceptionObject(
-    "Cannot assign to an element of a Pair"));
-  throw e;
 }
 
 bool c_Pair::OffsetIsset(ObjectData* obj, TypedValue* key) {
@@ -4558,13 +5243,6 @@ bool c_Pair::OffsetContains(ObjectData* obj, TypedValue* key) {
     throwBadKeyType();
     return false;
   }
-}
-
-void c_Pair::OffsetUnset(ObjectData* obj, TypedValue* key) {
-  assert(static_cast<c_Pair*>(obj)->isFullyConstructed());
-  Object e(SystemLib::AllocRuntimeExceptionObject(
-    "Cannot unset an element of a Pair"));
-  throw e;
 }
 
 bool c_Pair::Equals(const ObjectData* obj1, const ObjectData* obj2) {
@@ -4718,7 +5396,7 @@ static inline bool isKeylessCollectionType(Collection::Type ctype) {
 
 void collectionSerialize(ObjectData* obj, VariableSerializer* serializer) {
   assert(obj->isCollection());
-  int64_t sz = obj->getCollectionSize();
+  int64_t sz = getCollectionSize(obj);
   if (Collection::isVectorType(obj->getCollectionType()) ||
       Collection::isSetType(obj->getCollectionType()) ||
       obj->getCollectionType() == Collection::PairType) {
@@ -4868,61 +5546,11 @@ enum class ErrMsgType {
   OnlyIntKeys,
 };
 
-/**
- * Construct the error message given its type and a collection name.
- */
-static std::string getErrMsg(ErrMsgType errType, const std::string& colName) {
-  std::string msgBody;
-
-  switch (errType) {
-  case ErrMsgType::CannotAssign:
-    msgBody = "Cannot assign to an element of a";
-    break;
-  case ErrMsgType::CannotUnset:
-    msgBody = "Cannot unset an element of a";
-    break;
-  case ErrMsgType::CannotAdd:
-    msgBody = "Cannot add an element to a";
-    break;
-  case ErrMsgType::OnlyIntKeys:
-    msgBody = "Only integer keys may be used with";
-    break;
-  default:
-    assert(false);
-  }
-
-  return msgBody + " " + colName;
-}
-
-/**
- * Throws an exception of the given type.
- */
-static void collectionThrowHelper(ErrMsgType errType,
-    const std::string& colName) {
-
-  std::function<ObjectData*(std::string)> excAlloc = nullptr;
-
-  switch (errType) {
-  case ErrMsgType::CannotAssign:
-  case ErrMsgType::CannotUnset:
-  case ErrMsgType::CannotAdd:
-    excAlloc = SystemLib::AllocRuntimeExceptionObject;
-    break;
-  case ErrMsgType::OnlyIntKeys:
-    excAlloc = SystemLib::AllocInvalidArgumentExceptionObject;
-    break;
-  default:
-    assert(false);
-  }
-
-  Object exc = excAlloc(getErrMsg(errType, colName));
-  throw exc;
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 
 template <bool throwOnMiss>
-static inline TypedValue* collectionAtImpl(ObjectData* obj, TypedValue* key) {
+static inline TypedValue* collectionAtImpl(ObjectData* obj,
+                                           const TypedValue* key) {
   assert(key->m_type != KindOfRef);
   switch (obj->getCollectionType()) {
     case Collection::VectorType:
@@ -4933,7 +5561,7 @@ static inline TypedValue* collectionAtImpl(ObjectData* obj, TypedValue* key) {
       return BaseMap::OffsetAt<throwOnMiss>(obj, key);
     case Collection::SetType:
     case Collection::ImmSetType:
-      return BaseSet::OffsetAt(obj, key);
+      BaseSet::throwNoIndexAccess();
     case Collection::PairType:
       return c_Pair::OffsetAt<throwOnMiss>(obj, key);
     case Collection::InvalidType:
@@ -4943,12 +5571,107 @@ static inline TypedValue* collectionAtImpl(ObjectData* obj, TypedValue* key) {
   return nullptr;
 }
 
-TypedValue* collectionAt(ObjectData* obj, TypedValue* key) {
+// collectionAt() is used to get the address of an element for reading only.
+// Throws an exception if the element is not present.
+TypedValue* collectionAt(ObjectData* obj, const TypedValue* key) {
   return collectionAtImpl<true>(obj, key);
 }
 
+// collectionGet() is used to get the address of an element for reading
+// only. Returns nullptr if the element is not present.
 TypedValue* collectionGet(ObjectData* obj, TypedValue* key) {
   return collectionAtImpl<false>(obj, key);
+}
+
+// collectionAtLval() is used to get the address of an element when the
+// caller is NOT going to do direct write per se, but it intends to use
+// the element as the base of a member operation in an "lvalue" context
+// (which could mutate the element in various ways).
+TypedValue* collectionAtLval(ObjectData* obj, const TypedValue* key) {
+  assert(key->m_type != KindOfRef);
+  TypedValue* ret;
+  switch (obj->getCollectionType()) {
+    case Collection::VectorType: {
+      ret = BaseVector::OffsetAt<true>(obj, key);
+      // We're about to expose an element of a Vector in an lvalue context;
+      // if the element is a value-type (anything other than objects and
+      // resources) we need to sever any buffer sharing that might be going on
+      auto* vec = static_cast<c_Vector*>(obj);
+      if (UNLIKELY(vec->hasImmutableBuffer() &&
+                   ret->m_type != KindOfObject &&
+                   ret->m_type != KindOfResource)) {
+        vec->mutate();
+        ret = BaseVector::OffsetAt<true>(obj, key);
+      }
+      return ret;
+    }
+    case Collection::ImmVectorType: {
+      ret = BaseVector::OffsetAt<true>(obj, key);
+      break;
+    }
+    case Collection::MapType:
+      return BaseMap::OffsetAt<true>(obj, key);
+    case Collection::ImmMapType: {
+      ret = BaseMap::OffsetAt<true>(obj, key);
+      break;
+    }
+    case Collection::SetType:
+    case Collection::ImmSetType:
+      BaseSet::throwNoIndexAccess();
+    case Collection::PairType: {
+      ret = c_Pair::OffsetAt<true>(obj, key);
+      if (ret->m_type != KindOfObject && ret->m_type != KindOfResource) {
+        warn_cannot_modify_immutable_object(obj->o_getClassName().data());
+      }
+      return ret;
+    }
+    case Collection::InvalidType:
+      assert(false);
+      break;
+  }
+  // Value-type elements (anything other than objects and resources) of
+  // an immutable collection "inherit" the collection's immutable status.
+  // We do not allow value-type elements of an immutable collection to
+  // be read in an "lvalue" context in order to prevent null->array
+  // promotion, null->stdClass promotion, and mutating strings or arrays
+  // in place (see "test/slow/collection_classes/invalid-operations.php"
+  // for examples).
+  if (ret->m_type != KindOfObject && ret->m_type != KindOfResource) {
+    throw_cannot_modify_immutable_object(obj->o_getClassName().data());
+  }
+  return ret;
+}
+
+// collectionAtRw() is used to get the address of an element for reading
+// and writing. It is typically used for read-modify-write operations (the
+// SetOp* and IncDec* instructions).
+TypedValue* collectionAtRw(ObjectData* obj, const TypedValue* key) {
+  assert(key->m_type != KindOfRef);
+  switch (obj->getCollectionType()) {
+    case Collection::VectorType:
+      // Since we're exposing an element of a Vector in an read/write context,
+      // we need to sever any buffer sharing that might be going on.
+      static_cast<c_Vector*>(obj)->mutate();
+      return BaseVector::OffsetAt<true>(obj, key);
+    case Collection::MapType:
+      return BaseMap::OffsetAt<true>(obj, key);
+    case Collection::SetType:
+    case Collection::ImmSetType:
+      BaseSet::throwNoIndexAccess();
+    case Collection::ImmVectorType:
+    case Collection::ImmMapType:
+      throw_cannot_modify_immutable_object(obj->o_getClassName().data());
+      break;
+    case Collection::PairType: {
+      auto* ret = c_Pair::OffsetAt<true>(obj, key);
+      warn_cannot_modify_immutable_object(obj->o_getClassName().data());
+      return ret;
+    }
+    case Collection::InvalidType:
+      break;
+  }
+  assert(false);
+  return nullptr;
 }
 
 void collectionInitSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
@@ -4960,7 +5683,7 @@ void collectionInitSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
   BaseMap::OffsetSet(obj, key, val);
 }
 
-void collectionSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
+void collectionSet(ObjectData* obj, const TypedValue* key, TypedValue* val) {
   assert(key->m_type != KindOfRef);
   assert(val->m_type != KindOfRef);
   assert(val->m_type != KindOfUninit);
@@ -4974,22 +5697,16 @@ void collectionSet(ObjectData* obj, TypedValue* key, TypedValue* val) {
       break;
     case Collection::SetType:
     case Collection::ImmSetType:
-      BaseSet::OffsetSet(obj, key, val);
-      break;
-    case Collection::PairType:
-      c_Pair::OffsetSet(obj, key, val);
-      break;
+      BaseSet::throwNoIndexAccess();
     case Collection::ImmVectorType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "ImmVector");
-      break;
     case Collection::ImmMapType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "ImmMap");
+    case Collection::PairType:
+      throw_cannot_modify_immutable_object(obj->o_getClassName().data());
       break;
     case Collection::InvalidType:
       assert(false);
   }
 }
-
 
 bool collectionIsset(ObjectData* obj, TypedValue* key) {
   assert(key->m_type != KindOfRef);
@@ -5002,7 +5719,7 @@ bool collectionIsset(ObjectData* obj, TypedValue* key) {
       return BaseMap::OffsetIsset(obj, key);
     case Collection::SetType:
     case Collection::ImmSetType:
-      return BaseSet::OffsetIsset(obj, key);
+      BaseSet::throwNoIndexAccess();
     case Collection::PairType:
       return c_Pair::OffsetIsset(obj, key);
     case Collection::InvalidType:
@@ -5023,7 +5740,7 @@ bool collectionEmpty(ObjectData* obj, TypedValue* key) {
       return BaseMap::OffsetEmpty(obj, key);
     case Collection::SetType:
     case Collection::ImmSetType:
-      return BaseSet::OffsetEmpty(obj, key);
+      BaseSet::throwNoIndexAccess();
     case Collection::PairType:
       return c_Pair::OffsetEmpty(obj, key);
     case Collection::InvalidType:
@@ -5033,7 +5750,7 @@ bool collectionEmpty(ObjectData* obj, TypedValue* key) {
   not_reached();
 }
 
-void collectionUnset(ObjectData* obj, TypedValue* key) {
+void collectionUnset(ObjectData* obj, const TypedValue* key) {
   assert(key->m_type != KindOfRef);
   switch (obj->getCollectionType()) {
     case Collection::VectorType:
@@ -5043,19 +5760,12 @@ void collectionUnset(ObjectData* obj, TypedValue* key) {
       c_Map::OffsetUnset(obj, key);
       break;
     case Collection::SetType:
-      c_Set::OffsetUnset(obj, key);
-      break;
-    case Collection::PairType:
-      c_Pair::OffsetUnset(obj, key);
-      break;
-    case Collection::ImmVectorType:
-      collectionThrowHelper(ErrMsgType::CannotUnset, "ImmVector");
-      break;
-    case Collection::ImmMapType:
-      collectionThrowHelper(ErrMsgType::CannotUnset, "ImmMap");
-      break;
     case Collection::ImmSetType:
-      collectionThrowHelper(ErrMsgType::CannotUnset, "ImmSet");
+      BaseSet::throwNoIndexAccess();
+    case Collection::ImmVectorType:
+    case Collection::ImmMapType:
+    case Collection::PairType:
+      throw_cannot_modify_immutable_object(obj->o_getClassName().data());
       break;
     case Collection::InvalidType:
       assert(false);
@@ -5077,18 +5787,11 @@ void collectionAppend(ObjectData* obj, TypedValue* val) {
     case Collection::SetType:
       static_cast<c_Set*>(obj)->add(val);
       break;
-    case Collection::PairType:
-      assert(static_cast<c_Pair*>(obj)->isFullyConstructed());
-      collectionThrowHelper(ErrMsgType::CannotAdd, "Pair");
-      break;
     case Collection::ImmVectorType:
-      collectionThrowHelper(ErrMsgType::CannotAdd, "ImmVector");
-      break;
     case Collection::ImmMapType:
-      collectionThrowHelper(ErrMsgType::CannotAdd, "ImmMap");
-      break;
     case Collection::ImmSetType:
-      collectionThrowHelper(ErrMsgType::CannotAdd, "ImmSet");
+    case Collection::PairType:
+      throw_cannot_modify_immutable_object(obj->o_getClassName().data());
       break;
     case Collection::InvalidType:
       assert(false);
@@ -5119,182 +5822,7 @@ void collectionInitAppend(ObjectData* obj, TypedValue* val) {
   }
 }
 
-template <bool throwOnMiss>
-static inline Variant& collectionOffsetAtImpl(ObjectData* obj, int64_t offset) {
-  TypedValue* res;
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType:
-    case Collection::ImmVectorType:
-      res = throwOnMiss ? static_cast<BaseVector*>(obj)->at(offset)
-                        : static_cast<BaseVector*>(obj)->get(offset);
-      break;
-    case Collection::MapType:
-    case Collection::ImmMapType:
-      res = throwOnMiss ? static_cast<BaseMap*>(obj)->at(offset)
-                        : static_cast<BaseMap*>(obj)->get(offset);
-      break;
-    case Collection::SetType:
-    case Collection::ImmSetType:
-      BaseSet::throwNoIndexAccess();
-      res = nullptr;
-      break;
-    case Collection::PairType:
-      res = throwOnMiss ? static_cast<c_Pair*>(obj)->at(offset)
-                        : static_cast<c_Pair*>(obj)->get(offset);
-      break;
-    case Collection::InvalidType:
-      assert(false);
-      res = nullptr;
-      break;
-  }
-  if (!throwOnMiss && !res) {
-    res = (TypedValue*)(&init_null_variant);
-  }
-  return tvAsVariant(res);
-}
-
-Variant& collectionOffsetAt(ObjectData* obj, int64_t offset) {
-  return collectionOffsetAtImpl<true>(obj, offset);
-}
-
-Variant& collectionOffsetGet(ObjectData* obj, int64_t offset) {
-  return collectionOffsetAtImpl<false>(obj, offset);
-}
-
-template <bool throwOnMiss>
-static inline Variant& collectionOffsetAtImpl(ObjectData* obj,
-                                              const String& offset) {
-  TypedValue* res;
-  StringData* key = offset.get();
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType:
-      collectionThrowHelper(ErrMsgType::OnlyIntKeys, "Vectors");
-      res = nullptr;
-      break;
-    case Collection::MapType:
-    case Collection::ImmMapType:
-      res = throwOnMiss ? static_cast<BaseMap*>(obj)->at(key)
-                        : static_cast<BaseMap*>(obj)->get(key);
-      break;
-    case Collection::SetType:
-    case Collection::ImmSetType:
-      BaseSet::throwNoIndexAccess();
-      res = nullptr;
-      break;
-    case Collection::PairType:
-      collectionThrowHelper(ErrMsgType::OnlyIntKeys, "Pairs");
-      res = nullptr;
-      break;
-    case Collection::ImmVectorType:
-      collectionThrowHelper(ErrMsgType::OnlyIntKeys, "ImmVectors");
-      res = nullptr;
-      break;
-    case Collection::InvalidType:
-      assert(false);
-      res = nullptr;
-      break;
-  }
-  if (!throwOnMiss && !res) {
-    res = (TypedValue*)(&init_null_variant);
-  }
-  return tvAsVariant(res);
-}
-
-Variant& collectionOffsetAt(ObjectData* obj, const String& offset) {
-  return collectionOffsetAtImpl<true>(obj, offset);
-}
-
-Variant& collectionOffsetGet(ObjectData* obj, const String& offset) {
-  return collectionOffsetAtImpl<false>(obj, offset);
-}
-
-Variant& collectionOffsetAt(ObjectData* obj, CVarRef offset) {
-  TypedValue* key = cvarToCell(&offset);
-  return tvAsVariant(collectionAt(obj, key));
-}
-
-Variant& collectionOffsetGet(ObjectData* obj, CVarRef offset) {
-  TypedValue* key = cvarToCell(&offset);
-  auto* res = collectionGet(obj, key);
-  if (!res) {
-    res = (TypedValue*)(&init_null_variant);
-  }
-  return tvAsVariant(res);
-}
-
-void collectionOffsetSet(ObjectData* obj, int64_t offset, CVarRef val) {
-  TypedValue* tv = cvarToCell(&val);
-  if (UNLIKELY(tv->m_type == KindOfUninit)) {
-    tv = (TypedValue*)(&init_null_variant);
-  }
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType:
-      static_cast<c_Vector*>(obj)->set(offset, tv);
-      break;
-    case Collection::MapType:
-      static_cast<c_Map*>(obj)->set(offset, tv);
-      break;
-    case Collection::SetType:
-    case Collection::ImmSetType:
-      BaseSet::throwNoIndexAccess();
-      break;
-    case Collection::PairType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "Pair");
-      break;
-    case Collection::ImmVectorType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "ImmVector");
-      break;
-    case Collection::ImmMapType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "ImmMap");
-      break;
-    case Collection::InvalidType:
-      assert(false);
-      break;
-  }
-}
-
-void collectionOffsetSet(ObjectData* obj, const String& offset, CVarRef val) {
-  StringData* key = offset.get();
-  TypedValue* tv = cvarToCell(&val);
-  if (UNLIKELY(tv->m_type == KindOfUninit)) {
-    tv = (TypedValue*)(&init_null_variant);
-  }
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType:
-      collectionThrowHelper(ErrMsgType::OnlyIntKeys, "Vectors");
-      break;
-    case Collection::MapType:
-      static_cast<c_Map*>(obj)->set(key, tv);
-      break;
-    case Collection::SetType:
-    case Collection::ImmSetType:
-      BaseSet::throwNoIndexAccess();
-      break;
-    case Collection::PairType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "Pair");
-      break;
-    case Collection::ImmVectorType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "ImmVector");
-      break;
-    case Collection::ImmMapType:
-      collectionThrowHelper(ErrMsgType::CannotAssign, "ImmMap");
-      break;
-    case Collection::InvalidType:
-      assert(false);
-      break;
-  }
-}
-
-void collectionOffsetSet(ObjectData* obj, CVarRef offset, CVarRef val) {
-  TypedValue* key = cvarToCell(&offset);
-  TypedValue* tv = cvarToCell(&val);
-  if (UNLIKELY(tv->m_type == KindOfUninit)) {
-    tv = (TypedValue*)(&init_null_variant);
-  }
-  collectionSet(obj, key, tv);
-}
-
-bool collectionOffsetContains(ObjectData* obj, CVarRef offset) {
+bool collectionContains(ObjectData* obj, const Variant& offset) {
   TypedValue* key = cvarToCell(&offset);
   switch (obj->getCollectionType()) {
     case Collection::VectorType:
@@ -5305,7 +5833,7 @@ bool collectionOffsetContains(ObjectData* obj, CVarRef offset) {
       return BaseMap::OffsetContains(obj, key);
     case Collection::SetType:
     case Collection::ImmSetType:
-      return BaseSet::OffsetContains(obj, key);
+      BaseSet::throwNoIndexAccess();
     case Collection::PairType:
       return c_Pair::OffsetContains(obj, key);
     case Collection::InvalidType:

@@ -54,7 +54,7 @@ public:
     HasCall                = IsPublic,  //    x
     AllowOverride          = IsPrivate, //                  x
     IsReference            = (1 << 11), //                  x      x     x
-    IsConstructor          = (1 << 12), //                         x
+    // Unused              = (1 << 12),
 
     // need a non-zero number for const char * maps
     IsNothing              = (1 << 13),
@@ -80,7 +80,7 @@ public:
 
     IsTrait                = (1 << 29), //    x
     ZendParamModeFalse     = (1 << 30), //                  x      x
-    NeedsActRec            = (1u << 31),//                  x      x
+    NoFCallBuiltin         = (1u << 31),//                  x      x
   };
 
   class ConstantInfo {
@@ -92,12 +92,12 @@ public:
     const char *valueText;
     const void* callback;
 
-    CVarRef getDeferredValue() const;
+    const Variant& getDeferredValue() const;
     Variant getValue() const;
     bool isDeferred() const { return deferred; }
     bool isCallback() const { return callback != nullptr; }
-    void setValue(CVarRef value);
-    void setStaticValue(CVarRef value);
+    void setValue(const Variant& value);
+    void setStaticValue(const Variant& value);
 
     bool isDynamic() const {
       return deferred;
@@ -115,7 +115,7 @@ public:
     String name;
 
     Variant getValue() const;
-    void setStaticValue(CVarRef value);
+    void setStaticValue(const Variant& value);
 
   private:
     Variant value;
@@ -184,16 +184,6 @@ public:
    * Load everything.
    */
   static void Load();
-
-  /**
-   * Return a list of PHP library functions.
-   */
-  static Array GetSystemFunctions();
-
-  /**
-   * Return a list of user defined functions.
-   */
-  static Array GetUserFunctions();
 
   /**
    * Locate one function.
@@ -281,7 +271,7 @@ public:
   /**
    * Return lists of names for auto-complete purposes.
    */
-  static void GetClassSymbolNames(CArrRef names, bool interface, bool trait,
+  static void GetClassSymbolNames(const Array& names, bool interface, bool trait,
                                   std::vector<String> &classes,
                                   std::vector<String> *clsMethods,
                                   std::vector<String> *clsProperties,

@@ -60,7 +60,7 @@ PlainFile::~PlainFile() {
 }
 
 void PlainFile::sweep() {
-  PlainFile::closeImpl();
+  closeImpl();
   File::sweep();
 }
 
@@ -110,6 +110,7 @@ bool PlainFile::open(const String& filename, const String& mode) {
 }
 
 bool PlainFile::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 
@@ -259,6 +260,7 @@ BuiltinFile::~BuiltinFile() {
 }
 
 bool BuiltinFile::close() {
+  invokeFiltersOnClose();
   auto status = ::fclose(m_stream);
   m_closed = true;
   m_stream = nullptr;
@@ -268,6 +270,7 @@ bool BuiltinFile::close() {
 }
 
 void BuiltinFile::sweep() {
+  invokeFiltersOnClose();
   // This object was just a wrapper around a FILE* or fd owned by someone else,
   // so don't close it except in explicit calls to close().
   m_stream = nullptr;
@@ -285,12 +288,12 @@ void BuiltinFiles::requestInit() {
 }
 
 void BuiltinFiles::requestShutdown() {
-  m_stdin.reset();
-  m_stdout.reset();
-  m_stderr.reset();
+  m_stdin.releaseForSweep();
+  m_stdout.releaseForSweep();
+  m_stderr.releaseForSweep();
 }
 
-CVarRef BuiltinFiles::GetSTDIN() {
+const Variant& BuiltinFiles::GetSTDIN() {
   if (g_builtin_files->m_stdin.isNull()) {
     BuiltinFile *f = NEWOBJ(BuiltinFile)(stdin);
     g_builtin_files->m_stdin = f;
@@ -300,7 +303,7 @@ CVarRef BuiltinFiles::GetSTDIN() {
   return g_builtin_files->m_stdin;
 }
 
-CVarRef BuiltinFiles::GetSTDOUT() {
+const Variant& BuiltinFiles::GetSTDOUT() {
   if (g_builtin_files->m_stdout.isNull()) {
     BuiltinFile *f = NEWOBJ(BuiltinFile)(stdout);
     g_builtin_files->m_stdout = f;
@@ -310,7 +313,7 @@ CVarRef BuiltinFiles::GetSTDOUT() {
   return g_builtin_files->m_stdout;
 }
 
-CVarRef BuiltinFiles::GetSTDERR() {
+const Variant& BuiltinFiles::GetSTDERR() {
   if (g_builtin_files->m_stderr.isNull()) {
     BuiltinFile *f = NEWOBJ(BuiltinFile)(stderr);
     g_builtin_files->m_stderr = f;

@@ -41,12 +41,12 @@ class c_AsyncFunctionWaitHandle : public c_BlockableWaitHandle {
     Class* cls = c_AsyncFunctionWaitHandle::classof());
   ~c_AsyncFunctionWaitHandle() {}
   void t___construct();
-  static void ti_setoncreatecallback(CVarRef callback);
-  static void ti_setonawaitcallback(CVarRef callback);
-  static void ti_setonsuccesscallback(CVarRef callback);
-  static void ti_setonfailcallback(CVarRef callback);
+  static void ti_setoncreatecallback(const Variant& callback);
+  static void ti_setonawaitcallback(const Variant& callback);
+  static void ti_setonsuccesscallback(const Variant& callback);
+  static void ti_setonfailcallback(const Variant& callback);
   Object t_getprivdata();
-  void t_setprivdata(CObjRef data);
+  void t_setprivdata(const Object& data);
 
  public:
   static ptrdiff_t getContOffset() {
@@ -56,11 +56,11 @@ class c_AsyncFunctionWaitHandle : public c_BlockableWaitHandle {
     return offsetof(c_AsyncFunctionWaitHandle, m_continuation) - objOffset;
   }
   static ObjectData* CreateFunc(const Func* genFunc,
-                                int32_t label,
+                                Offset offset,
                                 ObjectData* child);
   static ObjectData* CreateMeth(const Func* genFunc,
                                 void* objOrCls,
-                                int32_t label,
+                                Offset offset,
                                 ObjectData* child);
   void run();
   uint16_t getDepth() { return m_depth; }
@@ -78,10 +78,9 @@ class c_AsyncFunctionWaitHandle : public c_BlockableWaitHandle {
   void enterContextImpl(context_idx_t ctx_idx);
 
  private:
-  void initialize(c_Continuation* continuation, int32_t label,
-                  c_WaitableWaitHandle* child);
+  void initialize(c_Continuation* continuation, c_WaitableWaitHandle* child);
   void markAsSucceeded(const Cell& result);
-  void markAsFailed(CObjRef exception);
+  void markAsFailed(const Object& exception);
 
   p_Continuation m_continuation;
   p_WaitableWaitHandle m_child;

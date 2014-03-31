@@ -75,7 +75,7 @@ IMPLEMENT_STATIC_REQUEST_LOCAL(MySQLRequestData, s_mysql_data);
 
 int MySQL::s_default_port = 0;
 
-MySQL *MySQL::Get(CVarRef link_identifier) {
+MySQL *MySQL::Get(const Variant& link_identifier) {
   if (link_identifier.isNull()) {
     return GetDefaultConn();
   }
@@ -85,7 +85,7 @@ MySQL *MySQL::Get(CVarRef link_identifier) {
   return mysql;
 }
 
-MYSQL *MySQL::GetConn(CVarRef link_identifier, MySQL **rconn /* = NULL */) {
+MYSQL *MySQL::GetConn(const Variant& link_identifier, MySQL **rconn /* = NULL */) {
   MySQL *mySQL = Get(link_identifier);
   MYSQL *ret = nullptr;
   if (mySQL) {
@@ -106,7 +106,7 @@ MYSQL *MySQL::GetConn(CVarRef link_identifier, MySQL **rconn /* = NULL */) {
   return ret;
 }
 
-bool MySQL::CloseConn(CVarRef link_identifier) {
+bool MySQL::CloseConn(const Variant& link_identifier) {
   MySQL *mySQL = Get(link_identifier);
   if (mySQL && !mySQL->isPersistent()) {
     mySQL->close();
@@ -333,8 +333,8 @@ bool MySQL::reconnect(const String& host, int port, const String& socket,
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
-MySQLResult *php_mysql_extract_result(CVarRef result) {
-  MySQLResult *res = result.toResource().getTyped<MySQLResult>
+MySQLResult *php_mysql_extract_result(const Resource& result) {
+  MySQLResult *res = result.getTyped<MySQLResult>
     (!RuntimeOption::ThrowBadTypeExceptions,
      !RuntimeOption::ThrowBadTypeExceptions);
   if (res == nullptr || (res->get() == nullptr && !res->isLocalized())) {
@@ -390,7 +390,7 @@ const char *php_mysql_get_field_name(int field_type) {
   return "unknown";
 }
 
-Variant php_mysql_field_info(CVarRef result, int field, int entry_type) {
+Variant php_mysql_field_info(const Resource& result, int field, int entry_type) {
   MySQLResult *res = php_mysql_extract_result(result);
   if (res == NULL) return false;
 
@@ -1217,12 +1217,12 @@ unsigned long net_field_length(unsigned char **);
 void free_root(::MEM_ROOT *, int);
 }
 
-static bool php_mysql_read_rows(MYSQL *mysql, CVarRef result) {
+static bool php_mysql_read_rows(MYSQL *mysql, const Variant& result) {
   unsigned long pkt_len;
   unsigned char *cp;
   unsigned int fields = mysql->field_count;
   NET *net = &mysql->net;
-  MySQLResult *res = php_mysql_extract_result(result);
+  MySQLResult *res = php_mysql_extract_result(result.toResource());
 
   if ((pkt_len = cli_safe_read(mysql)) == packet_error) {
     return false;
@@ -1286,7 +1286,7 @@ static Variant php_mysql_localize_result(MYSQL *mysql) {
 }
 #endif // FACEBOOK
 
-MySQLQueryReturn php_mysql_do_query(const String& query, CVarRef link_id,
+MySQLQueryReturn php_mysql_do_query(const String& query, const Variant& link_id,
                                     bool async_mode) {
   SYNC_VM_REGS_SCOPED();
   if (mysqlExtension::ReadOnly &&
@@ -1319,8 +1319,9 @@ MySQLQueryReturn php_mysql_do_query(const String& query, CVarRef link_id,
                         q, ref(matches));
     int size = matches.toArray().size();
     if (size > 2) {
-      string verb = toLower(matches[size - 2].toString().data());
-      string table = toLower(matches[size - 1].toString().data());
+      auto marray = matches.toArray();
+      string verb = toLower(marray[size - 2].toString().data());
+      string table = toLower(marray[size - 1].toString().data());
       if (!table.empty() && table[0] == '`') {
         table = table.substr(1, table.length() - 2);
       }
@@ -1331,7 +1332,7 @@ MySQLQueryReturn php_mysql_do_query(const String& query, CVarRef link_id,
           HHVM_FN(preg_match)("([^\\s,]+)\\s*=\\s*([^\\s,]+)[\\+\\-]",
                               q, ref(matches));
           size = matches.toArray().size();
-          if (size > 2 && same(matches[1], matches[2])) {
+          if (size > 2 && same(matches.toArray()[1], matches.toArray()[2])) {
             MySqlStats::Record("incdec", rconn->m_xaction_count, table);
           }
         }
@@ -1345,8 +1346,9 @@ MySQLQueryReturn php_mysql_do_query(const String& query, CVarRef link_id,
                           "(begin|commit|rollback)/is",
                           query, ref(matches));
       size = matches.toArray().size();
+      auto marray = matches.toArray();
       if (size == 2) {
-        string verb = toLower(matches[1].toString().data());
+        string verb = toLower(marray[1].toString().data());
         rconn->m_xaction_count = ((verb == "begin") ? 1 : 0);
         ServerStats::Log(string("sql.query.") + verb, 1);
         if (RuntimeOption::EnableStats && RuntimeOption::EnableSQLTableStats) {
@@ -1423,7 +1425,7 @@ MySQLQueryReturn php_mysql_do_query(const String& query, CVarRef link_id,
   return MySQLQueryReturn::OK_FETCH_RESULT;
 }
 
-Variant php_mysql_get_result(CVarRef link_id, bool use_store) {
+Variant php_mysql_get_result(const Variant& link_id, bool use_store) {
   MySQL *rconn = NULL;
   MYSQL *conn = MySQL::GetConn(link_id, &rconn);
   if (!conn || !rconn) return false;
@@ -1469,7 +1471,7 @@ Variant php_mysql_get_result(CVarRef link_id, bool use_store) {
   return ret;
 }
 
-Variant php_mysql_do_query_and_get_result(const String& query, CVarRef link_id,
+Variant php_mysql_do_query_and_get_result(const String& query, const Variant& link_id,
                                           bool use_store, bool async_mode) {
   MySQLQueryReturn result = php_mysql_do_query(query, link_id, async_mode);
 
@@ -1488,7 +1490,7 @@ Variant php_mysql_do_query_and_get_result(const String& query, CVarRef link_id,
 ///////////////////////////////////////////////////////////////////////////////
 // row operations
 
-Variant php_mysql_fetch_hash(CVarRef result, int result_type) {
+Variant php_mysql_fetch_hash(const Resource& result, int result_type) {
   if ((result_type & PHP_MYSQL_BOTH) == 0) {
     throw_invalid_argument("result_type: %d", result_type);
     return false;

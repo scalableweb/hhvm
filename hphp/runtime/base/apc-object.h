@@ -17,10 +17,11 @@
 #ifndef incl_HPHP_APC_OBJECT_H_
 #define incl_HPHP_APC_OBJECT_H_
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/apc-string.h"
 #include <cinttypes>
 
+#include "hphp/util/either.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/apc-string.h"
 #include "hphp/runtime/base/complex-types.h"
 
 namespace HPHP {
@@ -43,7 +44,7 @@ struct APCObject {
 
   // Return an APCObject instance from a serialized version of the
   // object.  May return null.
-  static APCHandle* MakeAPCObject(APCHandle* obj, CVarRef value);
+  static APCHandle* MakeAPCObject(APCHandle* obj, const Variant& value);
 
   // Return an instance of a PHP object from the given object handle
   static Variant MakeObject(APCHandle* handle);
@@ -61,41 +62,10 @@ struct APCObject {
 private:
   friend struct APCHandle;
 
-  /*
-   * Either a Class*, if it's persistent, or a static StringData*, if
-   * not.  Or also it can be nullptr.
-   */
-  struct ClassOrString {
-    explicit ClassOrString(std::nullptr_t)
-      : bits(0)
-    {}
-
-    explicit ClassOrString(const Class* ptr)
-      : bits(classHasPersistentRDS(ptr)
-          ? reinterpret_cast<uintptr_t>(ptr)
-          : reinterpret_cast<uintptr_t>(ptr->preClass()->name()) | 1)
-    {}
-
-    bool isNull() const { return bits == 0; }
-
-    const Class* cls() const {
-      return !(bits & 0x1) ? reinterpret_cast<const Class*>(bits) : nullptr;
-    }
-
-    const StringData* name() const {
-      return (bits & 0x1)
-        ? reinterpret_cast<const StringData*>(bits & ~0x1)
-        : nullptr;
-    }
-
-  private:
-    uintptr_t bits;
-  };
-
   struct Prop {
     StringData* name;
     APCHandle* val;
-    ClassOrString ctx;
+    Either<const Class*,const StringData*> ctx;
   };
 
 private:
@@ -121,7 +91,7 @@ private:
 
 private:
   APCHandle m_handle;
-  ClassOrString m_cls;
+  Either<const Class*,const StringData*> m_cls;
   uint32_t m_propCount;
 };
 

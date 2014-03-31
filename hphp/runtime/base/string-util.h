@@ -17,10 +17,17 @@
 #ifndef incl_HPHP_STRING_UTIL_H_
 #define incl_HPHP_STRING_UTIL_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-string.h"
+
+#include "hphp/util/assertions.h"
+
+#include <cstdint>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+class Array;
+struct Variant;
 
 extern const StaticString k_HPHP_TRIM_CHARLIST;
 
@@ -100,7 +107,7 @@ public:
    */
   static Variant Explode(const String& input, const String& delimiter,
                          int limit = 0x7FFFFFFF);
-  static String  Implode(CVarRef items, const String& delim); // == Join()
+  static String  Implode(const Variant& items, const String& delim); // == Join()
   static Variant Split(const String& str, int split_length = 1);
   static Variant ChunkSplit(
     const String& body, int chunklen = 76,

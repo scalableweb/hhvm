@@ -50,17 +50,23 @@ public:
   DECLARE_RESOURCE_ALLOCATION(LdapLink)
 
   LdapLink() : link(NULL) {}
-  ~LdapLink() { close();}
+  ~LdapLink() { closeImpl(); }
 
   void close() {
+    closeImpl();
+    rebindproc = Variant();
+  }
+
+private:
+  void closeImpl() {
     if (link) {
       ldap_unbind_s(link);
       link = NULL;
       LDAPG(num_links)--;
     }
-    rebindproc.reset();
   }
 
+public:
   CLASSNAME_IS("ldap link");
   // overriding ResourceData
   virtual const String& o_getClassNameHook() const { return classnameof(); }
@@ -70,7 +76,8 @@ public:
 };
 
 void LdapLink::sweep() {
-  close();
+  closeImpl();
+  rebindproc.releaseForSweep();
 }
 
 class LdapResult : public SweepableResourceData {
@@ -132,7 +139,7 @@ static int _get_lderrno(LDAP *ldap) {
   return lderr;
 }
 
-static bool php_ldap_do_modify(CResRef link, const String& dn, CArrRef entry,
+static bool php_ldap_do_modify(const Resource& link, const String& dn, const Array& entry,
                                int oper) {
   bool is_full_add = false; /* flag for full add operation so ldap_mod_add
                                can be put back into oper, gerrit THomson */
@@ -274,8 +281,8 @@ static void php_set_opts(LDAP *ldap, int sizelimit, int timelimit, int deref,
   }
 }
 
-static Variant php_ldap_do_search(CVarRef link, CVarRef base_dn,
-                                  CVarRef filter, CArrRef attributes,
+static Variant php_ldap_do_search(const Variant& link, const Variant& base_dn,
+                                  const Variant& filter, const Array& attributes,
                                   int attrsonly, int sizelimit, int timelimit,
                                   int deref, int scope) {
   int num_attribs = attributes.size();
@@ -596,27 +603,27 @@ String f_ldap_err2str(int errnum) {
   return String(ldap_err2string(errnum), CopyString);
 }
 
-bool f_ldap_add(CResRef link, const String& dn, CArrRef entry) {
+bool f_ldap_add(const Resource& link, const String& dn, const Array& entry) {
   return php_ldap_do_modify(link, dn, entry, PHP_LD_FULL_ADD);
 }
 
-bool f_ldap_mod_add(CResRef link, const String& dn, CArrRef entry) {
+bool f_ldap_mod_add(const Resource& link, const String& dn, const Array& entry) {
   return php_ldap_do_modify(link, dn, entry, LDAP_MOD_ADD);
 }
 
-bool f_ldap_mod_del(CResRef link, const String& dn, CArrRef entry) {
+bool f_ldap_mod_del(const Resource& link, const String& dn, const Array& entry) {
   return php_ldap_do_modify(link, dn, entry, LDAP_MOD_DELETE);
 }
 
-bool f_ldap_mod_replace(CResRef link, const String& dn, CArrRef entry) {
+bool f_ldap_mod_replace(const Resource& link, const String& dn, const Array& entry) {
   return php_ldap_do_modify(link, dn, entry, LDAP_MOD_REPLACE);
 }
 
-bool f_ldap_modify(CResRef link, const String& dn, CArrRef entry) {
+bool f_ldap_modify(const Resource& link, const String& dn, const Array& entry) {
   return php_ldap_do_modify(link, dn, entry, LDAP_MOD_REPLACE);
 }
 
-bool f_ldap_bind(CResRef link, const String& bind_rdn /* = null_string */,
+bool f_ldap_bind(const Resource& link, const String& bind_rdn /* = null_string */,
                  const String& bind_password /* = null_string */) {
   int rc;
   LdapLink *ld = link.getTyped<LdapLink>();
@@ -629,13 +636,13 @@ bool f_ldap_bind(CResRef link, const String& bind_rdn /* = null_string */,
   return true;
 }
 
-bool f_ldap_set_rebind_proc(CResRef link, CVarRef callback) {
+bool f_ldap_set_rebind_proc(const Resource& link, const Variant& callback) {
   LdapLink *ld = link.getTyped<LdapLink>();
 
   if (callback.isString() && callback.toString().empty()) {
     /* unregister rebind procedure */
     if (!ld->rebindproc.isNull()) {
-      ld->rebindproc.reset();
+      ld->rebindproc = Variant();
       ldap_set_rebind_proc(ld->link, NULL, NULL);
     }
     return true;
@@ -651,14 +658,14 @@ bool f_ldap_set_rebind_proc(CResRef link, CVarRef callback) {
   if (ld->rebindproc.isNull()) {
     ldap_set_rebind_proc(ld->link, _ldap_rebind_proc, (void *)link.get());
   } else {
-    ld->rebindproc.reset();
+    ld->rebindproc = Variant();
   }
 
   ld->rebindproc = callback;
   return true;
 }
 
-bool f_ldap_sort(CResRef link, CResRef result, const String& sortfilter) {
+bool f_ldap_sort(const Resource& link, const Resource& result, const String& sortfilter) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResult *res = result.getTyped<LdapResult>();
 
@@ -671,7 +678,7 @@ bool f_ldap_sort(CResRef link, CResRef result, const String& sortfilter) {
   return true;
 }
 
-bool f_ldap_start_tls(CResRef link) {
+bool f_ldap_start_tls(const Resource& link) {
   LdapLink *ld = link.getTyped<LdapLink>();
   int rc, protocol = LDAP_VERSION3;
   if (((rc = ldap_set_option(ld->link, LDAP_OPT_PROTOCOL_VERSION, &protocol))
@@ -683,13 +690,13 @@ bool f_ldap_start_tls(CResRef link) {
   return true;
 }
 
-bool f_ldap_unbind(CResRef link) {
+bool f_ldap_unbind(const Resource& link) {
   LdapLink *ld = link.getTyped<LdapLink>();
   ld->close();
   return true;
 }
 
-bool f_ldap_get_option(CResRef link, int option, VRefParam retval) {
+bool f_ldap_get_option(const Resource& link, int option, VRefParam retval) {
   LdapLink *ld = link.getTyped<LdapLink>();
 
   switch (option) {
@@ -777,7 +784,7 @@ const StaticString
   s_value("value"),
   s_iscritical("iscritical");
 
-bool f_ldap_set_option(CVarRef link, int option, CVarRef newval) {
+bool f_ldap_set_option(const Variant& link, int option, const Variant& newval) {
   LDAP *ldap = NULL;
   if (!link.isNull()) {
     LdapLink *ld = link.toResource().getTyped<LdapLink>();
@@ -922,35 +929,35 @@ bool f_ldap_set_option(CVarRef link, int option, CVarRef newval) {
   return true;
 }
 
-bool f_ldap_close(CResRef link) {
+bool f_ldap_close(const Resource& link) {
   return f_ldap_unbind(link);
 }
 
-Variant f_ldap_list(CVarRef link, CVarRef base_dn, CVarRef filter,
-                    CArrRef attributes /* = null_array */,
+Variant f_ldap_list(const Variant& link, const Variant& base_dn, const Variant& filter,
+                    const Array& attributes /* = null_array */,
                     int attrsonly /* = 0 */, int sizelimit /* = -1 */,
                     int timelimit /* = -1 */, int deref /* = -1 */) {
   return php_ldap_do_search(link, base_dn, filter, attributes, attrsonly,
                             sizelimit, timelimit, deref, LDAP_SCOPE_ONELEVEL);
 }
 
-Variant f_ldap_read(CVarRef link, CVarRef base_dn, CVarRef filter,
-                    CArrRef attributes /* = null_array */,
+Variant f_ldap_read(const Variant& link, const Variant& base_dn, const Variant& filter,
+                    const Array& attributes /* = null_array */,
                     int attrsonly /* = 0 */, int sizelimit /* = -1 */,
                     int timelimit /* = -1 */, int deref /* = -1 */) {
   return php_ldap_do_search(link, base_dn, filter, attributes, attrsonly,
                             sizelimit, timelimit, deref, LDAP_SCOPE_BASE);
 }
 
-Variant f_ldap_search(CVarRef link, CVarRef base_dn, CVarRef filter,
-                      CArrRef attributes /* = null_array */,
+Variant f_ldap_search(const Variant& link, const Variant& base_dn, const Variant& filter,
+                      const Array& attributes /* = null_array */,
                       int attrsonly /* = 0 */, int sizelimit /* = -1 */,
                       int timelimit /* = -1 */, int deref /* = -1 */) {
   return php_ldap_do_search(link, base_dn, filter, attributes, attrsonly,
                             sizelimit, timelimit, deref, LDAP_SCOPE_SUBTREE);
 }
 
-bool f_ldap_rename(CResRef link, const String& dn, const String& newrdn,
+bool f_ldap_rename(const Resource& link, const String& dn, const String& newrdn,
                    const String& newparent,
                    bool deleteoldrdn) {
   LdapLink *ld = link.getTyped<LdapLink>();
@@ -960,7 +967,7 @@ bool f_ldap_rename(CResRef link, const String& dn, const String& newrdn,
   return rc == LDAP_SUCCESS;
 }
 
-bool f_ldap_delete(CResRef link, const String& dn) {
+bool f_ldap_delete(const Resource& link, const String& dn) {
   LdapLink *ld = link.getTyped<LdapLink>();
   int rc;
   if ((rc = ldap_delete_s(ld->link, (char*)dn.data())) != LDAP_SUCCESS) {
@@ -970,7 +977,7 @@ bool f_ldap_delete(CResRef link, const String& dn) {
   return true;
 }
 
-Variant f_ldap_compare(CResRef link, const String& dn, const String& attribute,
+Variant f_ldap_compare(const Resource& link, const String& dn, const String& attribute,
                        const String& value) {
   LdapLink *ld = link.getTyped<LdapLink>();
   int rc = ldap_compare_s(ld->link, (char*)dn.data(), (char*)attribute.data(),
@@ -983,18 +990,18 @@ Variant f_ldap_compare(CResRef link, const String& dn, const String& attribute,
   return -1LL;
 }
 
-int64_t f_ldap_errno(CResRef link) {
+int64_t f_ldap_errno(const Resource& link) {
   LdapLink *ld = link.getTyped<LdapLink>();
   return _get_lderrno(ld->link);
 }
 
-String f_ldap_error(CResRef link) {
+String f_ldap_error(const Resource& link) {
   LdapLink *ld = link.getTyped<LdapLink>();
   int ld_errno = _get_lderrno(ld->link);
   return String(ldap_err2string(ld_errno), CopyString);
 }
 
-Variant f_ldap_get_dn(CResRef link, CResRef result_entry) {
+Variant f_ldap_get_dn(const Resource& link, const Resource& result_entry) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
 
@@ -1007,13 +1014,13 @@ Variant f_ldap_get_dn(CResRef link, CResRef result_entry) {
   return false;
 }
 
-int64_t f_ldap_count_entries(CResRef link, CResRef result) {
+int64_t f_ldap_count_entries(const Resource& link, const Resource& result) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResult *res = result.getTyped<LdapResult>();
   return ldap_count_entries(ld->link, res->data);
 }
 
-Variant f_ldap_get_entries(CResRef link, CResRef result) {
+Variant f_ldap_get_entries(const Resource& link, const Resource& result) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResult *res = result.getTyped<LdapResult>();
 
@@ -1050,7 +1057,7 @@ Variant f_ldap_get_entries(CResRef link, CResRef result) {
   return ret;
 }
 
-Variant f_ldap_first_entry(CResRef link, CResRef result) {
+Variant f_ldap_first_entry(const Resource& link, const Resource& result) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResult *res = result.getTyped<LdapResult>();
 
@@ -1062,7 +1069,7 @@ Variant f_ldap_first_entry(CResRef link, CResRef result) {
   return NEWOBJ(LdapResultEntry)(entry, res);
 }
 
-Variant f_ldap_next_entry(CResRef link, CResRef result_entry) {
+Variant f_ldap_next_entry(const Resource& link, const Resource& result_entry) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
 
@@ -1074,7 +1081,7 @@ Variant f_ldap_next_entry(CResRef link, CResRef result_entry) {
   return NEWOBJ(LdapResultEntry)(msg, entry->result.get());
 }
 
-Array f_ldap_get_attributes(CResRef link, CResRef result_entry) {
+Array f_ldap_get_attributes(const Resource& link, const Resource& result_entry) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
   Array ret = Array::Create();
@@ -1082,7 +1089,7 @@ Array f_ldap_get_attributes(CResRef link, CResRef result_entry) {
   return ret;
 }
 
-Variant f_ldap_first_attribute(CResRef link, CResRef result_entry) {
+Variant f_ldap_first_attribute(const Resource& link, const Resource& result_entry) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
 
@@ -1096,7 +1103,7 @@ Variant f_ldap_first_attribute(CResRef link, CResRef result_entry) {
   return ret;
 }
 
-Variant f_ldap_next_attribute(CResRef link, CResRef result_entry) {
+Variant f_ldap_next_attribute(const Resource& link, const Resource& result_entry) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
 
@@ -1120,7 +1127,7 @@ Variant f_ldap_next_attribute(CResRef link, CResRef result_entry) {
   return ret;
 }
 
-Variant f_ldap_first_reference(CResRef link, CResRef result) {
+Variant f_ldap_first_reference(const Resource& link, const Resource& result) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResult *res = result.getTyped<LdapResult>();
 
@@ -1132,7 +1139,7 @@ Variant f_ldap_first_reference(CResRef link, CResRef result) {
   return NEWOBJ(LdapResultEntry)(entry, res);
 }
 
-Variant f_ldap_next_reference(CResRef link, CResRef result_entry) {
+Variant f_ldap_next_reference(const Resource& link, const Resource& result_entry) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
 
@@ -1144,7 +1151,7 @@ Variant f_ldap_next_reference(CResRef link, CResRef result_entry) {
   return NEWOBJ(LdapResultEntry)(entry_next, entry->result.get());
 }
 
-bool f_ldap_parse_reference(CResRef link, CResRef result_entry,
+bool f_ldap_parse_reference(const Resource& link, const Resource& result_entry,
                             VRefParam referrals) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
@@ -1168,7 +1175,7 @@ bool f_ldap_parse_reference(CResRef link, CResRef result_entry,
   return true;
 }
 
-bool f_ldap_parse_result(CResRef link, CResRef result, VRefParam errcode,
+bool f_ldap_parse_result(const Resource& link, const Resource& result, VRefParam errcode,
                          VRefParam matcheddn /* = null */,
                          VRefParam errmsg /* = null */,
                          VRefParam referrals /* = null */) {
@@ -1216,13 +1223,13 @@ bool f_ldap_parse_result(CResRef link, CResRef result, VRefParam errcode,
   return true;
 }
 
-bool f_ldap_free_result(CResRef result) {
+bool f_ldap_free_result(const Resource& result) {
   LdapResult *res = result.getTyped<LdapResult>();
   res->close();
   return true;
 }
 
-Variant f_ldap_get_values_len(CResRef link, CResRef result_entry,
+Variant f_ldap_get_values_len(const Resource& link, const Resource& result_entry,
                               const String& attribute) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LdapResultEntry *entry = result_entry.getTyped<LdapResultEntry>();
@@ -1247,12 +1254,12 @@ Variant f_ldap_get_values_len(CResRef link, CResRef result_entry,
   return ret;
 }
 
-Variant f_ldap_get_values(CResRef link, CResRef result_entry,
+Variant f_ldap_get_values(const Resource& link, const Resource& result_entry,
                           const String& attribute) {
   return f_ldap_get_values_len(link, result_entry, attribute);
 }
 
-bool f_ldap_control_paged_result(CResRef link, int pagesize,
+bool f_ldap_control_paged_result(const Resource& link, int pagesize,
                                  bool iscritical, const String& cookie) {
   LdapLink *ld = link.getTyped<LdapLink>();
   LDAPControl ctrl, *ctrlsp[2];
@@ -1293,7 +1300,7 @@ bool f_ldap_control_paged_result(CResRef link, int pagesize,
   return rc == LDAP_SUCCESS;
 }
 
-bool f_ldap_control_paged_result_response(CResRef link, CResRef result,
+bool f_ldap_control_paged_result_response(const Resource& link, const Resource& result,
                                           VRefParam cookie,
                                           VRefParam estimated) {
   LdapLink *ld = link.getTyped<LdapLink>();

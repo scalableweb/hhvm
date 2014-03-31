@@ -14,37 +14,44 @@
    +----------------------------------------------------------------------+
 */
 
-#include <sys/mman.h>
+#include "hphp/runtime/vm/unit.h"
 
-#include <iostream>
-#include <iomanip>
-#include <tbb/concurrent_unordered_map.h>
-#include <boost/algorithm/string.hpp>
+#include "hphp/compiler/option.h"
+
+#include "hphp/parser/parser.h"
+
+#include "hphp/runtime/base/file-repository.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/stats.h"
+#include "hphp/runtime/base/strings.h"
+
+#include "hphp/runtime/ext/std/ext_std_variable.h"
+#include "hphp/runtime/vm/blob-helper.h"
+#include "hphp/runtime/vm/bytecode.h"
+#include "hphp/runtime/vm/disas.h"
+#include "hphp/runtime/vm/func-inline.h"
+#include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/treadmill.h"
+#include "hphp/runtime/vm/unit-util.h"
+
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+
+#include "hphp/runtime/vm/verifier/check.h"
+
+#include "hphp/util/atomic.h"
+#include "hphp/util/file-util.h"
+#include "hphp/util/lock.h"
+#include "hphp/util/read-only-arena.h"
 
 #include "folly/Memory.h"
 #include "folly/ScopeGuard.h"
 
-#include "hphp/compiler/option.h"
-#include "hphp/util/lock.h"
-#include "hphp/util/atomic.h"
-#include "hphp/util/read-only-arena.h"
-#include "hphp/util/file-util.h"
-#include "hphp/parser/parser.h"
-
-#include "hphp/runtime/ext/ext_variable.h"
-#include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/blob-helper.h"
-#include "hphp/runtime/vm/disas.h"
-#include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
-#include "hphp/runtime/vm/verifier/check.h"
-#include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/vm/func-inline.h"
-#include "hphp/runtime/base/file-repository.h"
-#include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/vm/treadmill.h"
+#include <boost/algorithm/string.hpp>
+#include <sys/mman.h>
+#include <tbb/concurrent_unordered_map.h>
+#include <iostream>
+#include <iomanip>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -89,16 +96,6 @@ allocateBCRegion(const unsigned char* bc, size_t bclen) {
   return mem;
 }
 
-static bool needsNSNormalization(const StringData* name) {
-  return name->data()[0] == '\\' && name->data()[1] != '\\';
-}
-
-static String normalizeNS(const StringData* name) {
-  assert(needsNSNormalization(name));
-  assert(name->data()[name->size()] == 0);
-  return String(name->data() + 1, name->size() - 1, CopyString);
-}
-
 Mutex Unit::s_classesMutex;
 /*
  * We hold onto references to elements of this map. If we use a different
@@ -140,7 +137,7 @@ NamedEntity* Unit::GetNamedEntity(const StringData* str,
   NamedEntityMap::iterator it = s_namedDataMap->find(str);
   if (LIKELY(it != s_namedDataMap->end())) return &it->second;
   if (needsNSNormalization(str)) {
-    auto normStr = normalizeNS(str);
+    auto normStr = normalizeNS(StrNR(str).asString());
     if (normalizedStr) {
       *normalizedStr = normStr;
     }
@@ -201,7 +198,7 @@ UnitMergeInfo* UnitMergeInfo::alloc(size_t size) {
   return mi;
 }
 
-Array Unit::getUserFunctions() {
+Array Unit::getFunctions(bool system) {
   // Return an array of all defined functions.  This method is used
   // to support get_defined_functions().
   Array a = Array::Create();
@@ -209,7 +206,7 @@ Array Unit::getUserFunctions() {
     for (NamedEntityMap::const_iterator it = s_namedDataMap->begin();
          it != s_namedDataMap->end(); ++it) {
       Func* func_ = it->second.getCachedFunc();
-      if (!func_ || func_->isBuiltin() || func_->isGenerated()) {
+      if (!func_ || (system ^ func_->isBuiltin()) || func_->isGenerated()) {
         continue;
       }
       a.append(func_->nameRef());
@@ -477,11 +474,11 @@ bool Unit::compileTimeFatal(const StringData*& msg, int& line) const {
   //
   // Decode enough of pseudomain to determine whether it contains a
   // compile-time fatal, and if so, extract the error message and line number.
-  const Opcode* entry = getMain()->getEntry();
-  const Opcode* pc = entry;
+  auto entry = reinterpret_cast<const Op*>(getMain()->getEntry());
+  auto pc = entry;
   // String <id>; Fatal;
   // ^^^^^^
-  if (toOp(*pc) != OpString) {
+  if (*pc != Op::String) {
     return false;
   }
   pc++;
@@ -491,7 +488,7 @@ bool Unit::compileTimeFatal(const StringData*& msg, int& line) const {
   pc += sizeof(Id);
   // String <id>; Fatal;
   //              ^^^^^
-  if (toOp(*pc) != OpFatal) {
+  if (*pc != Op::Fatal) {
     return false;
   }
   msg = lookupLitstrId(id);
@@ -504,7 +501,7 @@ bool Unit::parseFatal(const StringData*& msg, int& line) const {
     return false;
   }
 
-  const Opcode* pc = getMain()->getEntry();
+  auto pc = getMain()->getEntry();
 
   // two opcodes + String's ID
   pc += sizeof(Id) + 2;
@@ -538,7 +535,8 @@ class FrameRestore {
       tmp.m_savedRbp = (uint64_t)fp;
       tmp.m_savedRip = 0;
       tmp.m_func = preClass->unit()->getMain();
-      tmp.m_soff = !fp ? 0
+      tmp.m_soff = !fp
+        ? 0
         : fp->m_func->unit()->offsetOf(pc) - fp->m_func->base();
       tmp.setThis(nullptr);
       tmp.m_varEnv = 0;
@@ -800,14 +798,12 @@ Class* Unit::loadClass(const NamedEntity* ne,
   if (LIKELY((cls = ne->getCachedClass()) != nullptr)) {
     return cls;
   }
-  JIT::VMRegAnchor _;
-  AutoloadHandler::s_instance->invokeHandler(
-    StrNR(const_cast<StringData*>(name)));
-  return Unit::lookupClass(ne);
+  return loadMissingClass(ne, name);
 }
 
 Class* Unit::loadMissingClass(const NamedEntity* ne,
-                              const StringData *name) {
+                              const StringData* name) {
+  JIT::VMRegAnchor _;
   AutoloadHandler::s_instance->invokeHandler(
     StrNR(const_cast<StringData*>(name)));
   return Unit::lookupClass(ne);
@@ -917,8 +913,8 @@ void Unit::initialMerge() {
               break;
             case UnitMergeKindReqDoc: {
               StringData* s = (StringData*)((char*)obj - (int)k);
-              HPHP::Eval::PhpFile* efile =
-                g_context->lookupIncludeRoot(s, InclOpDocRoot, nullptr, this);
+              auto const efile = g_context->lookupIncludeRoot(s,
+                InclOpFlags::DocRoot, nullptr, this);
               assert(efile);
               Unit* unit = efile->unit();
               unit->initialMerge();
@@ -991,7 +987,7 @@ TypedValue* Unit::loadCns(const StringData* cnsName) {
   if (LIKELY(tv != nullptr)) return tv;
 
   if (needsNSNormalization(cnsName)) {
-    return loadCns(normalizeNS(cnsName).get());
+    return loadCns(normalizeNS(cnsName));
   }
 
   if (!AutoloadHandler::s_instance->autoloadConstant(
@@ -1634,9 +1630,11 @@ void Unit::prettyPrint(std::ostream& out, PrintOpts opts) const {
   int prevLineNum = -1;
   MetaHandle metaHand;
   while (it < &m_bc[stopOffset]) {
-    assert(funcIt == funcMap.end() || funcIt->first >= offsetOf(it));
+    assert(funcIt == funcMap.end() ||
+      funcIt->first >= offsetOf(it));
     if (opts.showFuncs) {
-      if (funcIt != funcMap.end() && funcIt->first == offsetOf(it)) {
+      if (funcIt != funcMap.end() &&
+          funcIt->first == offsetOf(it)) {
         out.put('\n');
         funcIt->second->prettyPrint(out);
         ++funcIt;
@@ -2233,7 +2231,7 @@ Id UnitEmitter::mergeLitstr(const StringData* litstr) {
 
 Id UnitEmitter::mergeArray(const ArrayData* a) {
   Variant v(const_cast<ArrayData*>(a));
-  auto key = f_serialize(v).toCppString();
+  auto key = HHVM_FN(serialize)(v).toCppString();
   return mergeArray(a, key);
 }
 
@@ -2404,10 +2402,8 @@ Func* UnitEmitter::newFunc(const FuncEmitter* fe, Unit& unit,
                            Offset base, Offset past,
                            const StringData* name, Attr attrs, bool top,
                            const StringData* docComment, int numParams,
-                           bool needsGeneratorOrigFunc,
                            bool needsNextClonedClosure) {
   Func* f = new (Func::allocFuncMem(name, numParams,
-                                    needsGeneratorOrigFunc,
                                     needsNextClonedClosure,
                                     !preClass))
     Func(unit, id, preClass, line1, line2, base, past, name,

@@ -67,7 +67,10 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
   Unit* unit = fp->m_func->unit();
   Offset offset = unit->offsetOf(pc);
   TRACE(2, "CmdNext: pc %p, opcode %s at '%s' offset %d\n",
-        pc, opcodeToName(toOp(*pc)), fp->m_func->fullName()->data(), offset);
+        pc,
+        opcodeToName(*reinterpret_cast<const Op*>(pc)),
+        fp->m_func->fullName()->data(),
+        offset);
 
   int currentVMDepth = g_context->m_nesting;
   int currentStackDepth = proxy.getStackDepth();
@@ -198,7 +201,7 @@ void CmdNext::stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc) {
   // returns from generators, we follow the execution stack for now,
   // and end up at the caller of ASIO or send(). For async functions
   // stepping over an await, we land on the next statement.
-  auto op = toOp(*pc);
+  auto op = *reinterpret_cast<const Op*>(pc);
   if (fp->inGenerator() &&
       (op == OpContSuspend || op == OpContSuspendK || op == OpContRetC)) {
     TRACE(2, "CmdNext: encountered yield, await or return from generator\n");
@@ -206,7 +209,7 @@ void CmdNext::stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc) {
     // generators, to catch if we exit the the asio iterator or if we
     // are being iterated directly by PHP.
     if ((op == OpContRetC) || !fp->m_func->isAsync()) setupStepOuts();
-    op = toOp(*pc);
+    op = *reinterpret_cast<const Op*>(pc);
     if (op == OpContSuspend || op == OpContSuspendK) {
       // Patch the next normal execution point so we can pickup the stepping
       // from there if the caller is C++.
@@ -214,7 +217,7 @@ void CmdNext::stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc) {
     }
     removeLocationFilter();
     return;
-  } else if (fp->m_func->hasGeneratorAsBody() && (op == OpAsyncESuspend)) {
+  } else if (op == OpAsyncESuspend) {
     // We need to step over this opcode, then grab the continuation
     // and setup continuation stepping like we do for OpContSuspend.
     TRACE(2, "CmdNext: encountered create async\n");
@@ -243,11 +246,9 @@ void CmdNext::setupStepCont(ActRec* fp, PC pc) {
   DEBUG_ONLY auto ops = reinterpret_cast<const Op*>(pc);
   assert(ops[0] == OpContSuspend || ops[0] == OpContSuspendK);
   ++pc;
-  int32_t label = decodeVariableSizeImm(&pc);
-  c_Continuation* cont = frame_continuation(fp);
-  Offset nextInst = cont->getExecutionOffset(label);
+  Offset nextInst = fp->func()->unit()->offsetOf(pc);
   assert(nextInst != InvalidAbsoluteOffset);
-  m_stepContTag = cont->actRec();
+  m_stepContTag = fp;
   TRACE(2, "CmdNext: patch for cont step at '%s' offset %d\n",
         fp->m_func->fullName()->data(), nextInst);
   m_stepCont = StepDestination(fp->m_func->unit(), nextInst);
@@ -287,7 +288,7 @@ void CmdNext::cleanupStepCont() {
 void* CmdNext::getContinuationTag(ActRec* fp) {
   c_Continuation* cont = frame_continuation(fp);
   TRACE(2, "CmdNext: continuation tag %p for %s\n", cont,
-        cont->t_getorigfuncname()->data());
+        cont->t_getorigfuncname().data());
   assert(cont->actRec() == fp);
   return cont->actRec();
 }

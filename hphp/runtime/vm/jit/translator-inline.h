@@ -18,11 +18,9 @@
 #define incl_HPHP_TRANSLATOR_INLINE_H_
 
 #include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/translator-helpers.h"
 #include <boost/noncopyable.hpp>
 #include "hphp/runtime/base/execution-context.h"
-
-#define TVOFF(nm) offsetof(TypedValue, nm)
-#define AROFF(nm) offsetof(ActRec, nm)
 
 /*
  * Because of a circular dependence with ExecutionContext, these
@@ -61,11 +59,11 @@ inline bool isNativeImplCall(const Func* funcd, int numArgs) {
   return funcd && funcd->methInfo() && numArgs == funcd->numParams();
 }
 
-inline ptrdiff_t cellsToBytes(int nCells) {
-  return nCells * sizeof(Cell);
+inline int cellsToBytes(int nCells) {
+  return safe_cast<int32_t>(nCells * ssize_t(sizeof(Cell)));
 }
 
-inline int64_t localOffset(int64_t locId) {
+inline int localOffset(int locId) {
   return -cellsToBytes(locId + 1);
 }
 
@@ -80,7 +78,7 @@ struct VMRegAnchor : private boost::noncopyable {
   VMRegAnchor() {
     assert_native_stack_aligned();
     m_old = tl_regState;
-    g_translator->sync();
+    translatorSync();
   }
   explicit VMRegAnchor(ActRec* ar) {
     // Some C++ entry points have an ActRec prepared from after a call
@@ -91,9 +89,8 @@ struct VMRegAnchor : private boost::noncopyable {
 
     auto prevAr = g_context->getOuterVMFrame(ar);
     const Func* prevF = prevAr->m_func;
-    vmsp() = ar->inGenerator() ?
-      Stack::generatorStackBase(ar) - 1 :
-      (TypedValue*)ar - ar->numArgs();
+    assert(!ar->inGenerator());
+    vmsp() = (TypedValue*)ar - ar->numArgs();
     assert(g_context->m_stack.isValidAddress((uintptr_t)vmsp()));
     vmpc() = prevF->unit()->at(prevF->base() + ar->m_soff);
     vmfp() = (TypedValue*)prevAr;
@@ -111,7 +108,9 @@ struct EagerVMRegAnchor {
       DEBUG_ONLY const Cell* sp = vmsp();
       DEBUG_ONLY const auto* pc = vmpc();
       VMRegAnchor _;
-      assert(vmfp() == fp && vmsp() == sp && vmpc() == pc);
+      assert(vmfp() == fp);
+      assert(vmsp() == sp);
+      assert(vmpc() == pc);
     }
     m_old = tl_regState;
     tl_regState = VMRegState::CLEAN;

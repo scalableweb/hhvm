@@ -25,7 +25,7 @@
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ir.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/repo.h"
 
 // These files do ugly things with macros so include them last
@@ -189,7 +189,8 @@ int minstrBaseIdx(Opcode opc) {
          : opc == SetNewElemArray || opc == SetNewElemArrayStk ? 0
          : opc == BindNewElem || opc == BindNewElemStk ? 0
          : opc == ArraySet ? 1
-         : opc == SetOpProp || opc == SetOpPropStk ? 1
+         : opc == SetOpElem || opc == SetOpElemStk ? 0
+         : opc == IncDecElem || opc == IncDecElemStk ? 0
          : opcodeHasFlags(opc, MInstrProp) ? 2
          : opcodeHasFlags(opc, MInstrElem) ? 1
          : bad_value<int>();
@@ -496,13 +497,12 @@ SSATmp* HhbcTranslator::MInstrTranslator::getValAddr() {
   const Location& l = dl.location;
   if (l.space == Location::Local) {
     assert(!m_stackInputs.count(0));
-    return m_ht.ldLocAddr(l.offset, DataTypeGeneric); // teleported to container
+    return m_ht.ldLocAddr(l.offset, DataTypeSpecific);
   } else {
     assert(l.space == Location::Stack);
     assert(m_stackInputs.count(0));
     m_ht.spillStack();
-    return m_ht.ldStackAddr(m_stackInputs[0],
-                            DataTypeGeneric); // teleported to container
+    return m_ht.ldStackAddr(m_stackInputs[0], DataTypeSpecific);
   }
 }
 
@@ -571,7 +571,7 @@ void HhbcTranslator::MInstrTranslator::emitBaseLCR() {
       if (mia & MIA_define) {
         // We care whether or not the local is Uninit, and
         // CountnessInit will tell us that.
-        m_irb.constrainLocal(base.location.offset, DataTypeCountnessInit,
+        m_irb.constrainLocal(base.location.offset, DataTypeSpecific,
                             "emitBaseLCR: Uninit base local");
         gen(
           StLoc,
@@ -622,14 +622,14 @@ void HhbcTranslator::MInstrTranslator::emitBaseLCR() {
     }
 
     if (base.location.space == Location::Local) {
-      m_base = m_ht.ldLocAddr(base.location.offset, DataTypeGeneric);
+      m_base = m_ht.ldLocAddr(base.location.offset, DataTypeSpecific);
     } else {
       assert(base.location.space == Location::Stack);
       // Make sure the stack is clean before getting a pointer to one of its
       // elements.
       m_ht.spillStack();
       assert(m_stackInputs.count(m_iInd));
-      m_base = m_ht.ldStackAddr(m_stackInputs[m_iInd], DataTypeGeneric);
+      m_base = m_ht.ldStackAddr(m_stackInputs[m_iInd], DataTypeSpecific);
     }
     assert(m_base->type().isPtr());
   }
@@ -749,10 +749,11 @@ void HhbcTranslator::MInstrTranslator::emitBaseN() {
 }
 
 template <bool warn, bool define>
-static inline TypedValue* baseGImpl(TypedValue *key,
+static inline TypedValue* baseGImpl(TypedValue key,
                                     MInstrState* mis) {
   TypedValue* base;
   StringData* name = prepareKey(key);
+  SCOPE_EXIT { decRefStr(name); };
   VarEnv* varEnv = g_context->m_globalVarEnv;
   assert(varEnv != NULL);
   base = varEnv->lookup(name);
@@ -769,7 +770,6 @@ static inline TypedValue* baseGImpl(TypedValue *key,
       return const_cast<TypedValue*>(init_null_variant.asTypedValue());
     }
   }
-  decRefStr(name);
   if (base->m_type == KindOfRef) {
     base = base->m_data.pref->tv();
   }
@@ -778,19 +778,19 @@ static inline TypedValue* baseGImpl(TypedValue *key,
 
 namespace MInstrHelpers {
 TypedValue* baseG(TypedValue key, MInstrState* mis) {
-  return baseGImpl<false, false>(&key, mis);
+  return baseGImpl<false, false>(key, mis);
 }
 
 TypedValue* baseGW(TypedValue key, MInstrState* mis) {
-  return baseGImpl<true, false>(&key, mis);
+  return baseGImpl<true, false>(key, mis);
 }
 
 TypedValue* baseGD(TypedValue key, MInstrState* mis) {
-  return baseGImpl<false, true>(&key, mis);
+  return baseGImpl<false, true>(key, mis);
 }
 
 TypedValue* baseGWD(TypedValue key, MInstrState* mis) {
-  return baseGImpl<true, true>(&key, mis);
+  return baseGImpl<true, true>(key, mis);
 }
 }
 
@@ -871,9 +871,9 @@ void HhbcTranslator::MInstrTranslator::emitProp() {
 
 template <MInstrAttr attrs, bool isObj>
 static inline TypedValue* propImpl(Class* ctx, TypedValue* base,
-                                   TypedValue keyVal, MInstrState* mis) {
+                                   TypedValue key, MInstrState* mis) {
   return Prop<WDU(attrs), isObj>(
-    mis->tvScratch, mis->tvRef, ctx, base, &keyVal);
+    mis->tvScratch, mis->tvRef, ctx, base, key);
 }
 
 #define HELPER_TABLE(m)                             \
@@ -1059,9 +1059,8 @@ void HhbcTranslator::MInstrTranslator::emitPropSpecialized(const MInstrAttr mia,
 
 template <KeyType keyType, bool warn, bool define, bool reffy,
           bool unset>
-static inline TypedValue* elemImpl(TypedValue* base, TypedValue keyVal,
+static inline TypedValue* elemImpl(TypedValue* base, key_type<keyType> key,
                                    MInstrState* mis) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
   if (unset) {
     return ElemU<keyType>(mis->tvScratch, mis->tvRef, base, key);
   } else if (define) {
@@ -1096,7 +1095,7 @@ static inline TypedValue* elemImpl(TypedValue* base, TypedValue keyVal,
   m(elemSWDR,  KeyType::Str,   WarnDefineReffy)
 
 #define ELEM(nm, keyType, attrs)                                        \
-TypedValue* nm(TypedValue* base, TypedValue key, MInstrState* mis) {    \
+TypedValue* nm(TypedValue* base, key_type<keyType> key, MInstrState* mis) { \
   return elemImpl<keyType, WDRU(attrs)>(base, key, mis);                \
 }
 namespace MInstrHelpers {
@@ -1182,8 +1181,7 @@ static inline TypedValue* checkedGet(ArrayData* a, int64_t key) {
 }
 
 template<KeyType keyType, bool checkForInt, bool warn>
-static inline TypedValue* elemArrayImpl(
-  TypedValue* a, typename KeyTypeTraits<keyType>::rawType key) {
+static inline TypedValue* elemArrayImpl(TypedValue* a, key_type<keyType> key) {
   assert(a->m_type == KindOfArray);
   ArrayData* ad = a->m_data.parr;
   TypedValue* ret = checkForInt ? checkedGet(ad, key)
@@ -1200,10 +1198,10 @@ static inline TypedValue* elemArrayImpl(
   m(elemArraySiW,  KeyType::Str,        true,  true)    \
   m(elemArrayIW,   KeyType::Int,       false,  true)
 
-#define ELEM(nm, keyType, checkForInt, warn)            \
-  TypedValue* nm(TypedValue* a, TypedValue* key) {      \
-    return elemArrayImpl<keyType, checkForInt, warn>(   \
-      a, keyAsRaw<keyType>(key));                       \
+#define ELEM(nm, keyType, checkForInt, warn)                    \
+  TypedValue* nm(TypedValue* a, key_type<keyType> key) {        \
+    return elemArrayImpl<keyType, checkForInt, warn>(           \
+      a, key);                                                  \
   }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -1297,8 +1295,7 @@ void HhbcTranslator::MInstrTranslator::emitFinalMOp() {
 
 template <KeyType keyType, bool isObj>
 static inline TypedValue cGetPropImpl(Class* ctx, TypedValue* base,
-                                      TypedValue keyVal, MInstrState* mis) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
+                                      key_type<keyType> key, MInstrState* mis) {
   TypedValue scratch;
   TypedValue* result = Prop<true, false, false, isObj, keyType>(
     scratch, mis->tvRef, ctx, base, key);
@@ -1317,10 +1314,10 @@ static inline TypedValue cGetPropImpl(Class* ctx, TypedValue* base,
   m(cGetPropS,    KeyType::Str, false)    \
   m(cGetPropSO,   KeyType::Str,  true)
 
-#define PROP(nm, ...)                                              \
-TypedValue nm(Class* ctx, TypedValue* base, TypedValue key,        \
+#define PROP(nm, kt, isObj)                                        \
+TypedValue nm(Class* ctx, TypedValue* base, key_type<kt> key,      \
                      MInstrState* mis) {                           \
-  return cGetPropImpl<__VA_ARGS__>(ctx, base, key, mis);           \
+  return cGetPropImpl<kt, isObj>(ctx, base, key, mis);             \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(PROP)
@@ -1366,9 +1363,8 @@ void HhbcTranslator::MInstrTranslator::emitCGetProp() {
 
 template <KeyType keyType, bool isObj>
 static inline RefData* vGetPropImpl(Class* ctx, TypedValue* base,
-                                    TypedValue keyVal, MInstrState* mis) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
-  TypedValue* result = HPHP::Prop<false, true, false, isObj, keyType>(
+                                    key_type<keyType> key, MInstrState* mis) {
+  TypedValue* result = Prop<false, true, false, isObj, keyType>(
     mis->tvScratch, mis->tvRef, ctx, base, key);
 
   if (result->m_type != KindOfRef) {
@@ -1386,10 +1382,10 @@ static inline RefData* vGetPropImpl(Class* ctx, TypedValue* base,
   m(vGetPropS,   KeyType::Str, false)  \
   m(vGetPropSO,  KeyType::Str,  true)
 
-#define PROP(nm, ...)                                              \
-RefData* nm(Class* ctx, TypedValue* base, TypedValue key,          \
-                     MInstrState* mis) {                           \
-  return vGetPropImpl<__VA_ARGS__>(ctx, base, key, mis);           \
+#define PROP(nm, kt, isObj)                                        \
+RefData* nm(Class* ctx, TypedValue* base, key_type<kt> key,        \
+            MInstrState* mis) {                                    \
+  return vGetPropImpl<kt, isObj>(ctx, base, key, mis);             \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(PROP)
@@ -1407,8 +1403,8 @@ void HhbcTranslator::MInstrTranslator::emitVGetProp() {
 
 template <bool useEmpty, bool isObj>
 static inline bool issetEmptyPropImpl(Class* ctx, TypedValue* base,
-                                      TypedValue keyVal) {
-  return HPHP::IssetEmptyProp<useEmpty, isObj>(ctx, base, &keyVal);
+                                      TypedValue key) {
+  return HPHP::IssetEmptyProp<useEmpty, isObj>(ctx, base, key);
 }
 
 #define HELPER_TABLE(m)                                         \
@@ -1447,8 +1443,8 @@ void HhbcTranslator::MInstrTranslator::emitEmptyProp() {
 
 template <bool isObj>
 static inline void setPropImpl(Class* ctx, TypedValue* base,
-                               TypedValue keyVal, Cell val) {
-  HPHP::SetProp<false, isObj>(ctx, base, &keyVal, &val);
+                               TypedValue key, Cell val) {
+  HPHP::SetProp<false, isObj>(ctx, base, key, &val);
 }
 
 #define HELPER_TABLE(m)                     \
@@ -1496,10 +1492,11 @@ void HhbcTranslator::MInstrTranslator::emitSetProp() {
 #undef HELPER_TABLE
 
 template <bool isObj>
-static inline TypedValue setOpPropImpl(TypedValue* base, TypedValue keyVal,
+static inline TypedValue setOpPropImpl(Class* ctx, TypedValue* base,
+                                       TypedValue key,
                                        Cell val, MInstrState* mis, SetOpOp op) {
   TypedValue* result = HPHP::SetOpProp<isObj>(
-    mis->tvScratch, mis->tvRef, mis->ctx, op, base, &keyVal, &val);
+    mis->tvScratch, mis->tvRef, ctx, op, base, key, &val);
 
   Cell ret;
   cellDup(*tvToCell(result), ret);
@@ -1512,9 +1509,9 @@ static inline TypedValue setOpPropImpl(TypedValue* base, TypedValue keyVal,
   m(setOpPropCO,    true)
 
 #define SETOP(nm, ...)                                                 \
-TypedValue nm(TypedValue* base, TypedValue key,                        \
+TypedValue nm(Class* ctx, TypedValue* base, TypedValue key,            \
               Cell val, MInstrState* mis, SetOpOp op) {                \
-  return setOpPropImpl<__VA_ARGS__>(base, key, val, mis, op);          \
+  return setOpPropImpl<__VA_ARGS__>(ctx, base, key, val, mis, op);     \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(SETOP)
@@ -1528,19 +1525,19 @@ void HhbcTranslator::MInstrTranslator::emitSetOpProp() {
   typedef TypedValue (*OpFunc)(TypedValue*, TypedValue,
                                Cell, MInstrState*, SetOpOp);
   BUILD_OPTAB(m_base->isA(Type::Obj));
-  m_irb.gen(StRaw, m_misBase, cns(RawMemSlot::MisCtx), CTX());
   m_result = genStk(SetOpProp, makeCatch(), cns((TCA)opFunc),
-                    m_base, key, value, genMisPtr(), cns(op));
+                    CTX(), m_base, key, value, genMisPtr(), cns(op));
 }
 #undef HELPER_TABLE
 
 template <bool isObj>
-static inline TypedValue incDecPropImpl(TypedValue* base, TypedValue keyVal,
+static inline TypedValue incDecPropImpl(Class* ctx, TypedValue* base,
+                                        TypedValue key,
                                         MInstrState* mis, IncDecOp op) {
   TypedValue result;
   result.m_type = KindOfUninit;
   HPHP::IncDecProp<true, isObj>(
-    mis->tvScratch, mis->tvRef, mis->ctx, op, base, &keyVal, result);
+    mis->tvScratch, mis->tvRef, ctx, op, base, key, result);
   assert(result.m_type != KindOfRef);
   return result;
 }
@@ -1552,9 +1549,9 @@ static inline TypedValue incDecPropImpl(TypedValue* base, TypedValue keyVal,
   m(incDecPropCO,   true)
 
 #define INCDEC(nm, ...)                                                 \
-TypedValue nm(TypedValue* base, TypedValue key,                         \
+TypedValue nm(Class* ctx, TypedValue* base, TypedValue key,             \
               MInstrState* mis, IncDecOp op) {                          \
-  return incDecPropImpl<__VA_ARGS__>(base, key, mis, op);               \
+  return incDecPropImpl<__VA_ARGS__>(ctx, base, key, mis, op);          \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(INCDEC)
@@ -1567,17 +1564,16 @@ void HhbcTranslator::MInstrTranslator::emitIncDecProp() {
   typedef TypedValue (*OpFunc)(TypedValue*, TypedValue,
                                MInstrState*, IncDecOp);
   BUILD_OPTAB(m_base->isA(Type::Obj));
-  m_irb.gen(StRaw, m_misBase, cns(RawMemSlot::MisCtx), CTX());
   m_result = genStk(IncDecProp, makeCatch(), cns((TCA)opFunc),
-                    m_base, key, genMisPtr(), cns(op));
+                    CTX(), m_base, key, genMisPtr(), cns(op));
 }
 #undef HELPER_TABLE
 
 template <bool isObj>
-static inline void bindPropImpl(Class* ctx, TypedValue* base, TypedValue keyVal,
+static inline void bindPropImpl(Class* ctx, TypedValue* base, TypedValue key,
                                 RefData* val, MInstrState* mis) {
-  TypedValue* prop = HPHP::Prop<false, true, false, isObj>(
-    mis->tvScratch, mis->tvRef, ctx, base, &keyVal);
+  TypedValue* prop = Prop<false, true, false, isObj>(
+    mis->tvScratch, mis->tvRef, ctx, base, key);
   if (!(prop == &mis->tvScratch && prop->m_type == KindOfUninit)) {
     tvBindRef(val, prop);
   }
@@ -1612,8 +1608,8 @@ void HhbcTranslator::MInstrTranslator::emitBindProp() {
 
 template <bool isObj>
 static inline void unsetPropImpl(Class* ctx, TypedValue* base,
-                                 TypedValue keyVal) {
-  HPHP::UnsetProp<isObj>(ctx, base, &keyVal);
+                                 TypedValue key) {
+  HPHP::UnsetProp<isObj>(ctx, base, key);
 }
 
 #define HELPER_TABLE(m)            \
@@ -1684,8 +1680,7 @@ void HhbcTranslator::MInstrTranslator::emitPackedArrayGet(SSATmp* key) {
 }
 
 template<KeyType keyType, bool checkForInt>
-static inline TypedValue arrayGetImpl(
-  ArrayData* a, typename KeyTypeTraits<keyType>::rawType key) {
+static inline TypedValue arrayGetImpl(ArrayData* a, key_type<keyType> key) {
   TypedValue* ret = checkForInt ? checkedGet(a, key)
                                 : a->nvGet(key);
   if (ret) {
@@ -1703,9 +1698,9 @@ static inline TypedValue arrayGetImpl(
   m(arrayGetI,   KeyType::Int,   false)
 
 #define ELEM(nm, keyType, checkForInt)                                  \
-TypedValue nm(ArrayData* a, TypedValue* key) {                          \
-  return arrayGetImpl<keyType, checkForInt>(a, keyAsRaw<keyType>(key)); \
-}
+  TypedValue nm(ArrayData* a, key_type<keyType> key) {                  \
+    return arrayGetImpl<keyType, checkForInt>(a, key);                  \
+  }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
 }
@@ -1743,7 +1738,7 @@ void HhbcTranslator::MInstrTranslator::emitStringGet(SSATmp* key) {
 
 void HhbcTranslator::MInstrTranslator::emitVectorGet(SSATmp* key) {
   assert(key->isA(Type::Int));
-  if (key->isConst() && key->getValInt() < 0) {
+  if (key->isConst() && key->intVal() < 0) {
     PUNT(emitVectorGet);
   }
   SSATmp* size = gen(LdVectorSize, m_base);
@@ -1761,13 +1756,13 @@ void HhbcTranslator::MInstrTranslator::emitPairGet(SSATmp* key) {
   static_assert(sizeof(TypedValue) == 16,
                 "TypedValue size expected to be 16 bytes");
   if (key->isConst()) {
-    auto idx = key->getValInt();
+    auto idx = key->intVal();
     if (idx < 0 || idx > 1) {
       PUNT(emitPairGet);
     }
     // no reason to check bounds
     SSATmp* base = gen(LdPairBase, m_base);
-    auto index = cns(key->getValInt() << 4);
+    auto index = cns(key->intVal() << 4);
     m_result = gen(LdElem, base, index);
   } else {
     gen(CheckBounds, makeCatch(), key, cns(1));
@@ -1779,8 +1774,7 @@ void HhbcTranslator::MInstrTranslator::emitPairGet(SSATmp* key) {
 }
 
 template<KeyType keyType>
-static inline TypedValue mapGetImpl(
-  c_Map* map, typename KeyTypeTraits<keyType>::rawType key) {
+static inline TypedValue mapGetImpl(c_Map* map, key_type<keyType> key) {
   TypedValue* ret = map->at(key);
   tvRefcountedIncRef(ret);
   return *ret;
@@ -1791,10 +1785,10 @@ static inline TypedValue mapGetImpl(
   m(mapGetS,   KeyType::Str)   \
   m(mapGetI,   KeyType::Int)
 
-#define ELEM(nm, keyType)                             \
-TypedValue nm(c_Map* map, TypedValue* key) {          \
-  return mapGetImpl<keyType>(map, keyAsRaw<keyType>(key)); \
-}
+#define ELEM(nm, keyType)                                   \
+  TypedValue nm(c_Map* map, key_type<keyType> key) {        \
+    return mapGetImpl<keyType>(map, key);                   \
+  }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
 }
@@ -1811,9 +1805,8 @@ void HhbcTranslator::MInstrTranslator::emitMapGet(SSATmp* key) {
 #undef HELPER_TABLE
 
 template <KeyType keyType>
-static inline TypedValue cGetElemImpl(TypedValue* base, TypedValue keyVal,
+static inline TypedValue cGetElemImpl(TypedValue* base, key_type<keyType> key,
                                       MInstrState* mis) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
   TypedValue scratch;
   TypedValue* result = Elem<true, keyType>(scratch, mis->tvRef, base, key);
 
@@ -1830,9 +1823,9 @@ static inline TypedValue cGetElemImpl(TypedValue* base, TypedValue keyVal,
   m(cGetElemI,  KeyType::Int)              \
   m(cGetElemS,  KeyType::Str)
 
-#define ELEM(nm, ...)                                                   \
-TypedValue nm(TypedValue* base, TypedValue key, MInstrState* mis) {     \
-  return cGetElemImpl<__VA_ARGS__>(base, key, mis);                     \
+#define ELEM(nm, kt)                                                    \
+TypedValue nm(TypedValue* base, key_type<kt> key, MInstrState* mis) {   \
+  return cGetElemImpl<kt>(base, key, mis);                              \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -1873,9 +1866,8 @@ void HhbcTranslator::MInstrTranslator::emitCGetElem() {
 #undef HELPER_TABLE
 
 template <KeyType keyType>
-static inline RefData* vGetElemImpl(TypedValue* base, TypedValue keyVal,
+static inline RefData* vGetElemImpl(TypedValue* base, key_type<keyType> key,
                                     MInstrState* mis) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
   TypedValue* result = HPHP::ElemD<false, true, keyType>(
     mis->tvScratch, mis->tvRef, base, key);
 
@@ -1893,9 +1885,9 @@ static inline RefData* vGetElemImpl(TypedValue* base, TypedValue keyVal,
   m(vGetElemI,    KeyType::Int)              \
   m(vGetElemS,    KeyType::Str)
 
-#define ELEM(nm, ...)                                                   \
-RefData* nm(TypedValue* base, TypedValue key, MInstrState* mis) {       \
-  return vGetElemImpl<__VA_ARGS__>(base, key,  mis);                    \
+#define ELEM(nm, kt)                                                  \
+RefData* nm(TypedValue* base, key_type<kt> key, MInstrState* mis) {   \
+  return vGetElemImpl<kt>(base, key,  mis);                           \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -1912,9 +1904,8 @@ void HhbcTranslator::MInstrTranslator::emitVGetElem() {
 #undef HELPER_TABLE
 
 template <KeyType keyType, bool isEmpty>
-static inline bool issetEmptyElemImpl(TypedValue* base, TypedValue keyVal,
+static inline bool issetEmptyElemImpl(TypedValue* base, key_type<keyType> key,
                                       MInstrState* mis) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
   // mis == nullptr if we proved that it won't be used. mis->tvScratch and
   // mis->tvRef are ok because those params are passed by
   // reference.
@@ -1931,9 +1922,9 @@ static inline bool issetEmptyElemImpl(TypedValue* base, TypedValue keyVal,
   m(issetElemS,   KeyType::Str, false)  \
   m(issetElemSE,  KeyType::Str,  true)
 
-#define ISSET(nm, ...)                                             \
-uint64_t nm(TypedValue* base, TypedValue key, MInstrState* mis) {  \
-  return issetEmptyElemImpl<__VA_ARGS__>(base, key, mis);          \
+#define ISSET(nm, kt, isEmpty)                                       \
+uint64_t nm(TypedValue* base, key_type<kt> key, MInstrState* mis) {  \
+  return issetEmptyElemImpl<kt, isEmpty>(base, key, mis);            \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(ISSET)
@@ -1967,8 +1958,7 @@ void HhbcTranslator::MInstrTranslator::emitPackedArrayIsset() {
 }
 
 template<KeyType keyType, bool checkForInt>
-static inline uint64_t arrayIssetImpl(
-  ArrayData* a, typename KeyTypeTraits<keyType>::rawType key) {
+static inline uint64_t arrayIssetImpl(ArrayData* a, key_type<keyType> key) {
   TypedValue* value = checkForInt ? checkedGet(a, key)
                                   : a->nvGet(key);
   Variant* var = &tvAsVariant(value);
@@ -1982,8 +1972,8 @@ static inline uint64_t arrayIssetImpl(
   m(arrayIssetI,    KeyType::Int,   false)
 
 #define ISSET(nm, keyType, checkForInt)                                 \
-  uint64_t nm(ArrayData* a, TypedValue* key) {                          \
-    return arrayIssetImpl<keyType, checkForInt>(a, keyAsRaw<keyType>(key)); \
+  uint64_t nm(ArrayData* a, key_type<keyType> key) {                    \
+    return arrayIssetImpl<keyType, checkForInt>(a, key);                \
   }
 namespace MInstrHelpers {
 HELPER_TABLE(ISSET)
@@ -2041,8 +2031,7 @@ void HhbcTranslator::MInstrTranslator::emitPairIsset() {
 }
 
 template<KeyType keyType>
-static inline uint64_t mapIssetImpl(
-  c_Map* map, typename KeyTypeTraits<keyType>::rawType key) {
+static inline uint64_t mapIssetImpl(c_Map* map, key_type<keyType> key) {
   auto result = map->get(key);
   return result ? !cellIsNull(result) : false;
 }
@@ -2052,10 +2041,10 @@ static inline uint64_t mapIssetImpl(
   m(mapIssetS,   KeyType::Str)   \
   m(mapIssetI,   KeyType::Int)
 
-#define ELEM(nm, keyType)                                    \
-uint64_t nm(c_Map* map, TypedValue* key) {                   \
-  return mapIssetImpl<keyType>(map, keyAsRaw<keyType>(key)); \
-}
+#define ELEM(nm, keyType)                                          \
+  uint64_t nm(c_Map* map, key_type<keyType> key) {                 \
+    return mapIssetImpl<keyType>(map, key);                        \
+  }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
 }
@@ -2104,21 +2093,21 @@ void HhbcTranslator::MInstrTranslator::emitEmptyElem() {
 }
 
 static inline ArrayData* checkedSet(ArrayData* a, StringData* key,
-                                    CVarRef value, bool copy) {
+                                    const Variant& value, bool copy) {
   int64_t i;
   return UNLIKELY(key->isStrictlyInteger(i)) ? a->set(i, value, copy)
                                              : a->set(key, value, copy);
 }
 
 static inline ArrayData* checkedSet(ArrayData* a, int64_t key,
-                                    CVarRef value, bool copy) {
+                                    const Variant& value, bool copy) {
   not_reached();
 }
 
 template<KeyType keyType, bool checkForInt, bool setRef>
 static inline typename ShuffleReturn<setRef>::return_type arraySetImpl(
-    ArrayData* a, typename KeyTypeTraits<keyType>::rawType key,
-    CVarRef value, RefData* ref) {
+    ArrayData* a, key_type<keyType> key,
+    const Variant& value, RefData* ref) {
   static_assert(keyType != KeyType::Any,
                 "KeyType::Any is not supported in arraySetMImpl");
   const bool copy = a->hasMultipleRefs();
@@ -2138,11 +2127,11 @@ static inline typename ShuffleReturn<setRef>::return_type arraySetImpl(
   m(arraySetIR,  KeyType::Int,   false,      true)
 
 #define ELEM(nm, keyType, checkForInt, setRef)                          \
-typename ShuffleReturn<setRef>::return_type                             \
-nm(ArrayData* a, TypedValue* key, TypedValue value, RefData* ref) {     \
-  return arraySetImpl<keyType, checkForInt, setRef>(                    \
-    a, keyAsRaw<keyType>(key), tvAsCVarRef(&value), ref);               \
-}
+  typename ShuffleReturn<setRef>::return_type                           \
+  nm(ArrayData* a, key_type<keyType> key, TypedValue value, RefData* ref) { \
+    return arraySetImpl<keyType, checkForInt, setRef>(                  \
+      a, key, tvAsCVarRef(&value), ref);                                \
+  }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
 }
@@ -2197,9 +2186,9 @@ void HhbcTranslator::MInstrTranslator::emitArraySet(SSATmp* key,
 #undef HELPER_TABLE
 
 namespace MInstrHelpers {
-void setWithRefElemC(TypedValue* base, TypedValue keyVal, TypedValue* val,
+void setWithRefElemC(TypedValue* base, TypedValue key, TypedValue* val,
                      MInstrState* mis) {
-  base = HPHP::ElemD<false, false>(mis->tvScratch, mis->tvRef, base, &keyVal);
+  base = HPHP::ElemD<false, false>(mis->tvScratch, mis->tvRef, base, key);
   if (base != &mis->tvScratch) {
     tvDup(*val, *base);
   } else {
@@ -2262,7 +2251,7 @@ void HhbcTranslator::MInstrTranslator::emitSetWithRefNewElem() {
 void HhbcTranslator::MInstrTranslator::emitVectorSet(
     SSATmp* key, SSATmp* value) {
   assert(key->isA(Type::Int));
-  if (key->isConst() && key->getValInt() < 0) {
+  if (key->isConst() && key->intVal() < 0) {
     PUNT(emitVectorSet); // will throw
   }
   SSATmp* size = gen(LdVectorSize, m_base);
@@ -2290,10 +2279,7 @@ void HhbcTranslator::MInstrTranslator::emitVectorSet(
 }
 
 template<KeyType keyType>
-static inline void mapSetImpl(
-    c_Map* map,
-    typename KeyTypeTraits<keyType>::rawType key,
-    Cell value) {
+static inline void mapSetImpl(c_Map* map, key_type<keyType> key, Cell value) {
   map->set(key, &value);
 }
 
@@ -2302,10 +2288,10 @@ static inline void mapSetImpl(
   m(mapSetS,   KeyType::Str)   \
   m(mapSetI,   KeyType::Int)
 
-#define ELEM(nm, keyType)                                       \
-void nm(c_Map* map, TypedValue* key, Cell value) {              \
-  mapSetImpl<keyType>(map, keyAsRaw<keyType>(key), value);      \
-}
+#define ELEM(nm, keyType)                                             \
+  void nm(c_Map* map, key_type<keyType> key, Cell value) {            \
+    mapSetImpl<keyType>(map, key, value);                             \
+  }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
 }
@@ -2324,9 +2310,8 @@ void HhbcTranslator::MInstrTranslator::emitMapSet(
 #undef HELPER_TABLE
 
 template <KeyType keyType>
-static inline StringData* setElemImpl(TypedValue* base, TypedValue keyVal,
+static inline StringData* setElemImpl(TypedValue* base, key_type<keyType> key,
                                       Cell val) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
   return HPHP::SetElem<false, keyType>(base, key, &val);
 }
 
@@ -2336,9 +2321,9 @@ static inline StringData* setElemImpl(TypedValue* base, TypedValue keyVal,
   m(setElemI,   KeyType::Int)              \
   m(setElemS,   KeyType::Str)
 
-#define ELEM(nm, ...)                                              \
-StringData* nm(TypedValue* base, TypedValue key, Cell val) {       \
-  return setElemImpl<__VA_ARGS__>(base, key, val);                 \
+#define ELEM(nm, kt)                                               \
+StringData* nm(TypedValue* base, key_type<kt> key, Cell val) {     \
+  return setElemImpl<kt>(base, key, val);                          \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -2396,84 +2381,22 @@ void HhbcTranslator::MInstrTranslator::emitSetElem() {
 }
 #undef HELPER_TABLE
 
-template <SetOpOp op>
-static inline TypedValue setOpElemImpl(TypedValue* base, TypedValue keyVal,
-                                       Cell val, MInstrState* mis) {
-  TypedValue* result =
-    HPHP::SetOpElem(mis->tvScratch, mis->tvRef, op, base, &keyVal, &val);
-
-  Cell ret;
-  cellDup(*tvToCell(result), ret);
-  return ret;
-}
-
-#define OPELEM_TABLE(m, nm, pfx, op)            \
-  /* name          op */                        \
-  m(nm##op##ElemC, pfx op)
-
-#define HELPER_TABLE(m, op) OPELEM_TABLE(m, setOp, SetOpOp::, op)
-#define SETOP(nm, ...)                                                  \
-TypedValue nm(TypedValue* base, TypedValue key, Cell val,               \
-                     MInstrState* mis) {                                \
-  return setOpElemImpl<__VA_ARGS__>(base, key, val, mis);               \
-}
-#define SETOP_OP(op, bcOp) HELPER_TABLE(SETOP, op)
-namespace MInstrHelpers {
-SETOP_OPS
-}
-#undef SETOP_OP
-#undef SETOP
-
 void HhbcTranslator::MInstrTranslator::emitSetOpElem() {
-  SetOpOp op = SetOpOp(m_ni.imm[0].u_OA);
-  SSATmp* key = getKey();
-  typedef TypedValue (*OpFunc)(TypedValue*, TypedValue, Cell, MInstrState*);
-# define SETOP_OP(op, bcOp) HELPER_TABLE(FILL_ROW, op)
-  BUILD_OPTAB_ARG(SETOP_OPS, op);
-# undef SETOP_OP
-  m_result = genStk(SetOpElem, makeCatch(), cns((TCA)opFunc),
-                    m_base, key, getValue(), genMisPtr());
+  SetOpOp op = static_cast<SetOpOp>(m_ni.imm[0].u_OA);
+  m_result = genStk(SetOpElem, makeCatch(),
+                    m_base, getKey(), getValue(), genMisPtr(), cns(op));
 }
-#undef HELPER_TABLE
-
-template <IncDecOp op>
-static inline TypedValue incDecElemImpl(TypedValue* base, TypedValue keyVal,
-                                        MInstrState* mis) {
-  TypedValue result;
-  HPHP::IncDecElem<true>(
-    mis->tvScratch, mis->tvRef, op, base, &keyVal, result);
-  assert(result.m_type != KindOfRef);
-  return result;
-}
-
-#define HELPER_TABLE(m, op) OPELEM_TABLE(m, incDec, IncDecOp::, op)
-#define INCDEC(nm, ...)                                                 \
-TypedValue nm(TypedValue* base, TypedValue key, MInstrState* mis) {     \
-  return incDecElemImpl<__VA_ARGS__>(base, key, mis);                   \
-}
-#define INCDEC_OP(op) HELPER_TABLE(INCDEC, op)
-namespace MInstrHelpers {
-INCDEC_OPS
-}
-#undef INCDEC_OP
-#undef INCDEC
 
 void HhbcTranslator::MInstrTranslator::emitIncDecElem() {
   IncDecOp op = static_cast<IncDecOp>(m_ni.imm[0].u_OA);
-  SSATmp* key = getKey();
-  typedef TypedValue (*OpFunc)(TypedValue*, TypedValue, MInstrState*);
-# define INCDEC_OP(op) HELPER_TABLE(FILL_ROW, op)
-  BUILD_OPTAB_ARG(INCDEC_OPS, op);
-# undef INCDEC_OP
-  m_result = genStk(IncDecElem, makeCatch(), cns((TCA)opFunc),
-                    m_base, key, genMisPtr());
+  m_result = genStk(IncDecElem, makeCatch(),
+                    m_base, getKey(), genMisPtr(), cns(op));
 }
-#undef HELPER_TABLE
 
 namespace MInstrHelpers {
-void bindElemC(TypedValue* base, TypedValue keyVal, RefData* val,
+void bindElemC(TypedValue* base, TypedValue key, RefData* val,
                MInstrState* mis) {
-  base = HPHP::ElemD<false, true>(mis->tvScratch, mis->tvRef, base, &keyVal);
+  base = HPHP::ElemD<false, true>(mis->tvScratch, mis->tvRef, base, key);
   if (!(base == &mis->tvScratch && base->m_type == KindOfUninit)) {
     tvBindRef(val, base);
   }
@@ -2489,8 +2412,7 @@ void HhbcTranslator::MInstrTranslator::emitBindElem() {
 }
 
 template <KeyType keyType>
-static inline void unsetElemImpl(TypedValue* base, TypedValue keyVal) {
-  TypedValue* key = keyPtr<keyType>(keyVal);
+static inline void unsetElemImpl(TypedValue* base, key_type<keyType> key) {
   HPHP::UnsetElem<keyType>(base, key);
 }
 
@@ -2500,9 +2422,9 @@ static inline void unsetElemImpl(TypedValue* base, TypedValue keyVal) {
   m(unsetElemI,   KeyType::Int)         \
   m(unsetElemS,   KeyType::Str)
 
-#define ELEM(nm, ...)                                      \
-void nm(TypedValue* base, TypedValue key) {                \
-  unsetElemImpl<__VA_ARGS__>(base, key);                   \
+#define ELEM(nm, kt)                           \
+void nm(TypedValue* base, key_type<kt> key) {  \
+  unsetElemImpl<kt>(base, key);                \
 }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -2585,7 +2507,7 @@ void HhbcTranslator::MInstrTranslator::emitMPost() {
     switch (input.location.space) {
     case Location::Stack: {
       ++nStack;
-      auto input = getInput(i, DataTypeCountness); // just going to decref it
+      auto input = getInput(i, DataTypeSpecific);
       if (input->isA(Type::Gen)) {
         gen(DecRef, input);
         if (m_failedSetBlock) {

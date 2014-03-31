@@ -18,7 +18,7 @@
 #include "hphp/vixl/a64/simulator-a64.h"
 
 #include "hphp/runtime/vm/jit/abi-arm.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/util/data-block.h"
 
@@ -96,7 +96,7 @@ FixupMap::fixupWork(ExecutionContext* ec, ActRec* rbp) const {
               regs.m_fp->m_func->name()->data(),
               regs.m_fp, regs.m_sp, regs.m_pc);
         ec->m_fp = const_cast<ActRec*>(regs.m_fp);
-        ec->m_pc = regs.m_pc;
+        ec->m_pc = reinterpret_cast<PC>(regs.m_pc);
         vmsp() = regs.m_sp;
         return;
       }
@@ -159,7 +159,7 @@ FixupMap::fixupWorkSimulated(ExecutionContext* ec) const {
           regs.m_fp->m_func->name()->data(),
           regs.m_fp, regs.m_sp, regs.m_pc);
     ec->m_fp = const_cast<ActRec*>(regs.m_fp);
-    ec->m_pc = regs.m_pc;
+    ec->m_pc = reinterpret_cast<PC>(regs.m_pc);
     vmsp() = regs.m_sp;
     return;
   }
@@ -186,7 +186,7 @@ void
 FixupMap::processPendingFixups() {
   for (uint i = 0; i < m_pendingFixups.size(); i++) {
     TCA tca = m_pendingFixups[i].m_tca;
-    assert(tx64->isValidCodeAddress(tca));
+    assert(mcg->isValidCodeAddress(tca));
     recordFixup(tca, m_pendingFixups[i].m_fixup);
   }
   m_pendingFixups.clear();
@@ -203,7 +203,7 @@ FixupMap::eagerRecord(const Func* func) {
     "func_num_args",
     "array_filter",
     "array_map",
-    "hphp_func_slice_args",
+    "__SystemLib\\func_slice_args",
   };
 
   for (int i = 0; i < sizeof(list)/sizeof(list[0]); i++) {

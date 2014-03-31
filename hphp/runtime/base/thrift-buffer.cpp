@@ -15,11 +15,14 @@
 */
 
 #include "hphp/runtime/base/thrift-buffer.h"
-#include <vector>
-#include "hphp/runtime/base/type-conversions.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/variable-unserializer.h"
+
 #include "hphp/util/logger.h"
+
+#include <vector>
 
 #define INVALID_DATA 1
 
@@ -237,7 +240,7 @@ void ThriftBuffer::read(Array &data) {
   data = unserialize_with_no_notice(sdata).toArray();
 }
 
-void ThriftBuffer::write(CArrRef data) {
+void ThriftBuffer::write(const Array& data) {
   VariableSerializer vs(m_serializerType);
   String sdata = vs.serialize(VarNR(data), true);
   write(sdata);
@@ -249,7 +252,7 @@ void ThriftBuffer::read(Object &data) {
   data = unserialize_with_no_notice(sdata).toObject();
 }
 
-void ThriftBuffer::write(CObjRef data) {
+void ThriftBuffer::write(const Object& data) {
   VariableSerializer vs(m_serializerType);
   String sdata = vs.serialize(VarNR(data), true);
   write(sdata);
@@ -261,7 +264,7 @@ void ThriftBuffer::read(Variant &data) {
   data = unserialize_with_no_notice(sdata);
 }
 
-void ThriftBuffer::write(CVarRef data) {
+void ThriftBuffer::write(const Variant& data) {
   VariableSerializer vs(m_serializerType);
   String sdata = vs.serialize(data, true);
   write(sdata);

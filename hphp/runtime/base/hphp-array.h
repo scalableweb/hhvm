@@ -17,9 +17,9 @@
 #ifndef incl_HPHP_HPHP_ARRAY_H_
 #define incl_HPHP_HPHP_ARRAY_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/array-data.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -32,7 +32,7 @@ class HphpArray : public ArrayData {
   // power-of-2 capacity, and L=LoadScale, we grow when S > C-C/L.
   // So 2 gives 0.5 load factor, 4 gives 0.75 load factor, 8 gives
   // 0.875 load factor. Use powers of 2 to enable shift-divide.
-  static const uint LoadScale = 4;
+  static const uint32_t LoadScale = 4;
 
 public:
   /*
@@ -64,25 +64,31 @@ public:
     // data.m_type == KindOfInvalid if this is an empty slot in the
     // array (e.g. after a key is deleted).
     TypedValueAux data;
+
     bool hasStrKey() const {
       return data.hash() != 0;
     }
+
     bool hasIntKey() const {
       return data.hash() == 0;
     }
+
     int32_t hash() const {
       return data.hash();
     }
+
     void setStaticKey(StringData* k, strhash_t h) {
       assert(k->isStatic());
       key = k;
       data.hash() = h | STRHASH_MSB;
     }
+
     void setStrKey(StringData* k, strhash_t h) {
       key = k;
       data.hash() = h | STRHASH_MSB;
       k->incRefCount();
     }
+
     void setIntKey(int64_t k) {
       ikey = k;
       data.hash() = 0;
@@ -138,7 +144,7 @@ public:
    * used for initial empty arrays (COW will cause it to escalate to a
    * request-local array if it is modified).
    */
-  static HphpArray* GetStaticEmptyArray();
+  static ArrayData* GetStaticEmptyArray();
 
   // This behaves the same as iter_begin except that it assumes
   // this array is not empty and its not virtual.
@@ -152,7 +158,7 @@ public:
 
   // These using directives ensure the full set of overloaded functions
   // are visible in this class, to avoid triggering implicit conversions
-  // from a CVarRef key to int64.
+  // from a const Variant& key to int64.
   using ArrayData::exists;
   using ArrayData::lval;
   using ArrayData::lvalNew;
@@ -164,11 +170,10 @@ public:
   using ArrayData::release;
 
   // implements ArrayData
-  static CVarRef GetValueRef(const ArrayData*, ssize_t pos);
+  static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
 
   // overrides ArrayData
   static bool IsVectorData(const ArrayData*);
-  static bool IsVectorDataPacked(const ArrayData*);
   static ssize_t IterBegin(const ArrayData*);
   static ssize_t IterEnd(const ArrayData*);
   static ssize_t IterAdvance(const ArrayData*, ssize_t pos);
@@ -178,7 +183,6 @@ public:
   static bool ExistsInt(const ArrayData*, int64_t k);
   static bool ExistsStr(const ArrayData*, const StringData* k);
   static bool ExistsIntPacked(const ArrayData*, int64_t k);
-  static bool ExistsStrPacked(const ArrayData*, const StringData* k);
 
   // implements ArrayData
   static ArrayData* LvalInt(ArrayData* ad, int64_t k, Variant*& ret,
@@ -193,30 +197,30 @@ public:
   static ArrayData* LvalNewPacked(ArrayData*, Variant*& ret, bool copy);
 
   // implements ArrayData
-  static ArrayData* SetIntPacked(ArrayData*, int64_t k, CVarRef v, bool copy);
-  static ArrayData* SetStrPacked(ArrayData*, StringData* k, CVarRef v,
+  static ArrayData* SetIntPacked(ArrayData*, int64_t k, const Variant& v, bool copy);
+  static ArrayData* SetStrPacked(ArrayData*, StringData* k, const Variant& v,
                                  bool copy);
-  static ArrayData* SetInt(ArrayData*, int64_t k, CVarRef v, bool copy);
-  static ArrayData* SetStr(ArrayData*, StringData* k, CVarRef v, bool copy);
+  static ArrayData* SetInt(ArrayData*, int64_t k, const Variant& v, bool copy);
+  static ArrayData* SetStr(ArrayData*, StringData* k, const Variant& v, bool copy);
 
   static ArrayData* ZSetInt(ArrayData*, int64_t k, RefData* v);
   static ArrayData* ZSetStr(ArrayData*, StringData* k, RefData* v);
   static ArrayData* ZAppend(ArrayData* ad, RefData* v);
 
   // implements ArrayData
-  static ArrayData* SetRefInt(ArrayData* ad, int64_t k, CVarRef v,
+  static ArrayData* SetRefInt(ArrayData* ad, int64_t k, const Variant& v,
                               bool copy);
-  static ArrayData* SetRefStr(ArrayData* ad, StringData* k, CVarRef v,
+  static ArrayData* SetRefStr(ArrayData* ad, StringData* k, const Variant& v,
                               bool copy);
-  static ArrayData* SetRefIntPacked(ArrayData* ad, int64_t k, CVarRef v,
+  static ArrayData* SetRefIntPacked(ArrayData* ad, int64_t k, const Variant& v,
                                     bool copy);
-  static ArrayData* SetRefStrPacked(ArrayData* ad, StringData* k, CVarRef v,
+  static ArrayData* SetRefStrPacked(ArrayData* ad, StringData* k, const Variant& v,
                                     bool copy);
 
   // overrides ArrayData
-  static ArrayData* AddInt(ArrayData*, int64_t k, CVarRef v, bool copy);
-  static ArrayData* AddStr(ArrayData*, StringData* k, CVarRef v, bool copy);
-  static ArrayData* AddIntPacked(ArrayData*, int64_t k, CVarRef v, bool copy);
+  static ArrayData* AddInt(ArrayData*, int64_t k, const Variant& v, bool copy);
+  static ArrayData* AddStr(ArrayData*, StringData* k, const Variant& v, bool copy);
+  static ArrayData* AddIntPacked(ArrayData*, int64_t k, const Variant& v, bool copy);
 
   // implements ArrayData
   static ArrayData* RemoveInt(ArrayData*, int64_t k, bool copy);
@@ -230,20 +234,20 @@ public:
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
   static ArrayData* NonSmartCopy(const ArrayData*);
 
-  static ArrayData* AppendPacked(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* Append(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* AppendRef(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* AppendRefPacked(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* AppendWithRef(ArrayData*, CVarRef v, bool copy);
-  static ArrayData* AppendWithRefPacked(ArrayData*, CVarRef v, bool copy);
+  static ArrayData* AppendPacked(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* AppendRef(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* AppendRefPacked(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* AppendWithRefPacked(ArrayData*, const Variant& v, bool copy);
   static ArrayData* PlusEq(ArrayData*, const ArrayData* elems);
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
   static ArrayData* Pop(ArrayData*, Variant& value);
   static ArrayData* PopPacked(ArrayData*, Variant& value);
   static ArrayData* Dequeue(ArrayData*, Variant& value);
-  static ArrayData* Prepend(ArrayData*, CVarRef v, bool copy);
+  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
   static ArrayData* DequeuePacked(ArrayData*, Variant& value);
-  static ArrayData* PrependPacked(ArrayData*, CVarRef v, bool copy);
+  static ArrayData* PrependPacked(ArrayData*, const Variant& v, bool copy);
   static void Renumber(ArrayData*);
   static void RenumberPacked(ArrayData*);
   static void OnSetEvalScalar(ArrayData*);
@@ -253,8 +257,8 @@ public:
   static void ReleaseUncounted(ArrayData*);
 
   // overrides ArrayData
-  static bool ValidFullPos(const ArrayData*, const FullPos &fp);
-  static bool AdvanceFullPos(ArrayData*, FullPos& fp);
+  static bool ValidMArrayIter(const ArrayData*, const MArrayIter &fp);
+  static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
 
   HphpArray* copyImpl() const;
   HphpArray* copyPacked() const;
@@ -300,9 +304,9 @@ public:
   static void Ksort(ArrayData*, int sort_flags, bool ascending);
   static void Sort(ArrayData*, int sort_flags, bool ascending);
   static void Asort(ArrayData*, int sort_flags, bool ascending);
-  static bool Uksort(ArrayData*, CVarRef cmp_function);
-  static bool Usort(ArrayData*, CVarRef cmp_function);
-  static bool Uasort(ArrayData*, CVarRef cmp_function);
+  static bool Uksort(ArrayData*, const Variant& cmp_function);
+  static bool Usort(ArrayData*, const Variant& cmp_function);
+  static bool Uasort(ArrayData*, const Variant& cmp_function);
 
   // Elm's data.m_type == KindOfInvalid for deleted slots.
   static bool isTombstone(DataType t) {
@@ -344,15 +348,12 @@ public:
   static size_t computeDataSize(uint32_t tableMask);
 
 private:
-  friend class ArrayInit;
+  friend struct ArrayInit;
   friend struct MemoryProfile;
-  struct EmptyArrayInitializer;
+  friend struct EmptyArray;
   enum class ClonePacked {};
   enum class CloneMixed {};
   enum SortFlavor { IntegerSort, StringSort, GenericSort };
-
-private:
-  static EmptyArrayInitializer s_arrayInitializer;
 
 private:
   // Safe downcast helpers
@@ -366,13 +367,15 @@ private:
   static void getElmKey(const Elm& e, TypedValue* out);
 
 private:
+  enum class AllocMode : bool { Smart, NonSmart };
+
   template<class CopyElem>
   static HphpArray* CopyPacked(const HphpArray& other,
-                               AllocationMode,
+                               AllocMode,
                                CopyElem);
   template<class CopyKeyValue>
   static HphpArray* CopyMixed(const HphpArray& other,
-                              AllocationMode,
+                              AllocMode,
                               CopyKeyValue);
   static HphpArray* CopyReserve(const HphpArray* src, size_t expectedSize);
 
@@ -446,20 +449,20 @@ private:
   int32_t* findForNewInsert(size_t h0) const;
   int32_t* findForNewInsert(int32_t* table, size_t mask, size_t h0) const;
 
-  bool nextInsert(CVarRef data);
-  ArrayData* nextInsertRef(CVarRef data);
-  ArrayData* nextInsertWithRef(CVarRef data);
-  ArrayData* addVal(int64_t ki, CVarRef data);
-  ArrayData* addVal(StringData* key, CVarRef data);
+  bool nextInsert(const Variant& data);
+  ArrayData* nextInsertRef(const Variant& data);
+  ArrayData* nextInsertWithRef(const Variant& data);
+  ArrayData* addVal(int64_t ki, const Variant& data);
+  ArrayData* addVal(StringData* key, const Variant& data);
 
   template <class K> ArrayData* addLvalImpl(K k, Variant*& ret);
-  template <class K> ArrayData* update(K k, CVarRef data);
-  template <class K> ArrayData* updateRef(K k, CVarRef data);
+  template <class K> ArrayData* update(K k, const Variant& data);
+  template <class K> ArrayData* updateRef(K k, const Variant& data);
 
   template <class K> ArrayData* zSetImpl(K k, RefData* data);
   ArrayData* zAppendImpl(RefData* data);
 
-  void adjustFullPos(ssize_t pos);
+  void adjustMArrayIter(ssize_t pos);
   void erase(ssize_t pos);
 
   HphpArray* copyImpl(HphpArray* target) const;
@@ -472,13 +475,13 @@ private:
 
   Elm& allocElm(int32_t* ei);
 
-  HphpArray* setVal(TypedValue& tv, CVarRef v);
-  HphpArray* setRef(TypedValue& tv, CVarRef v);
+  HphpArray* setVal(TypedValue& tv, const Variant& v);
+  HphpArray* setRef(TypedValue& tv, const Variant& v);
   HphpArray* getLval(TypedValue& tv, Variant*& ret);
-  HphpArray* initVal(TypedValue& tv, CVarRef v);
-  HphpArray* initRef(TypedValue& tv, CVarRef v);
+  HphpArray* initVal(TypedValue& tv, const Variant& v);
+  HphpArray* initRef(TypedValue& tv, const Variant& v);
   HphpArray* initLval(TypedValue& tv, Variant*& ret);
-  HphpArray* initWithRef(TypedValue& tv, CVarRef v);
+  HphpArray* initWithRef(TypedValue& tv, const Variant& v);
   HphpArray* moveVal(TypedValue& tv, TypedValue v);
 
   ArrayData* zInitVal(TypedValue& tv, RefData* v);
@@ -553,16 +556,15 @@ private:
 };
 
 extern std::aligned_storage<
-  sizeof(HphpArray) +
-    sizeof(HphpArray::Elm) * HphpArray::SmallSize,
-  alignof(HphpArray)
+  sizeof(ArrayData),
+  alignof(ArrayData)
 >::type s_theEmptyArray;
 
 //=============================================================================
 
-inline HphpArray* HphpArray::GetStaticEmptyArray() {
+inline ArrayData* HphpArray::GetStaticEmptyArray() {
   void* vp = &s_theEmptyArray;
-  return static_cast<HphpArray*>(vp);
+  return static_cast<ArrayData*>(vp);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

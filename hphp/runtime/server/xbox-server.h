@@ -41,7 +41,9 @@ public:
   /**
    * Send/PostMessage paradigm for local and remote RPC.
    */
-  static bool SendMessage(const String& message, Variant &ret, int timeout_ms,
+  static bool SendMessage(const String& message,
+                          Array& ret,
+                          int timeout_ms,
                           const String& host = "localhost");
   static bool PostMessage(const String& message, const String& host = "localhost");
 
@@ -50,8 +52,8 @@ public:
    */
   static Resource TaskStart(const String& msg, const String& reqInitDoc = "",
       ServerTaskEvent<XboxServer, XboxTransport> *event = nullptr);
-  static bool TaskStatus(CResRef task);
-  static int TaskResult(CResRef task, int timeout_ms, Variant &ret);
+  static bool TaskStatus(const Resource& task);
+  static int TaskResult(const Resource& task, int timeout_ms, Variant &ret);
   static int TaskResult(XboxTransport* const job, int timeout_ms, Variant &ret);
 
   /**

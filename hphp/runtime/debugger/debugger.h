@@ -26,6 +26,10 @@
 #include <tbb/concurrent_queue.h>
 #include <set>
 
+namespace HPHP {
+struct ThreadInfo;
+}
+
 namespace HPHP { namespace Eval {
 
 // Tag used on server log messages to highlight that they are likely useful to
@@ -84,7 +88,7 @@ public:
 
   // Interrupt from VM
   static void InterruptVMHook(int type = BreakPointReached,
-                              CVarRef e = null_variant);
+                              const Variant& e = null_variant);
 
   // Surround text with color, if set.
   static void SetTextColors();

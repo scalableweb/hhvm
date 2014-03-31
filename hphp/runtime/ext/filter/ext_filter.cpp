@@ -235,11 +235,11 @@ const StaticString
   s_default("default"),
   s_options("options");
 
-static Variant fail(bool return_null, CVarRef options) {
+static Variant fail(bool return_null, const Variant& options) {
   if (options.isArray()) {
-    CArrRef arr(options.toArray());
+    const Array& arr(options.toArray());
     if (arr.exists(s_default)) {
-      return options[s_default];
+      return arr[s_default];
     }
   }
   if (return_null) {
@@ -268,15 +268,16 @@ static filter_list_entry php_find_filter(uint64_t id) {
 
 #define FAIL_IF(x) do { if (x) return false; } while (0)
 
-static bool filter_var(Variant& ret, CVarRef variable, int64_t filter,
-                       CVarRef options) {
+static bool filter_var(Variant& ret, const Variant& variable, int64_t filter,
+                       const Variant& options) {
   filter_list_entry filter_func = php_find_filter(filter);
 
   int64_t flags;
   Variant option_array;
   if (options.isArray()) {
-    flags = options[s_flags].toInt64();
-    option_array = options[s_options];
+    auto arr = options.toArray();
+    flags = arr[s_flags].toInt64();
+    option_array = arr[s_options];
   } else {
     flags = options.toInt64();
   }
@@ -288,13 +289,13 @@ static bool filter_var(Variant& ret, CVarRef variable, int64_t filter,
       ((flags & k_FILTER_NULL_ON_FAILURE && ret.isNull()) ||
        (!(flags & k_FILTER_NULL_ON_FAILURE) && ret.isBoolean() &&
         ret.asBooleanVal() == 0))) {
-    ret = option_array[s_default];
+    ret = option_array.toArray()[s_default];
   }
   return true;
 }
 
-static bool filter_recursive(Variant& ret, CVarRef variable, int64_t filter,
-                             CVarRef options) {
+static bool filter_recursive(Variant& ret, const Variant& variable, int64_t filter,
+                             const Variant& options) {
   Array arr;
   for (ArrayIter iter(variable.toArray()); iter; ++iter) {
     Variant v;
@@ -337,11 +338,11 @@ Variant f_filter_id(const String& filtername) {
     if (x) return fail(filter_flags & k_FILTER_NULL_ON_FAILURE, options); \
   } while(0)
 
-Variant f_filter_var(CVarRef variable, int64_t filter /* = 516 */,
-                     CVarRef options /* = empty_array */) {
+Variant f_filter_var(const Variant& variable, int64_t filter /* = 516 */,
+                     const Variant& options /* = empty_array */) {
   int64_t filter_flags;
   if (options.isArray()) {
-    filter_flags = options[s_flags].toInt64();
+    filter_flags = options.toCArrRef()[s_flags].toInt64();
   } else {
     filter_flags = options.toInt64();
   }

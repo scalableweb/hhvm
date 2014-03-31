@@ -163,7 +163,7 @@ FuncInfo find_func_info(const Func* func) {
 
     for (; it != stop; it += instrLen(reinterpret_cast<const Op*>(it))) {
       auto const pop = reinterpret_cast<const Op*>(it);
-      auto const off = func->unit()->offsetOf(pop);
+      auto const off = func->unit()->offsetOf(it);
       if (isSwitch(*pop)) {
         foreachSwitchTarget(pop, [&] (Offset off) {
           add_target("L", pop - bcBase + off);
@@ -413,8 +413,7 @@ void print_func_body(Output& out, const FuncInfo& finfo) {
   min_priority_queue<Offset> ehEnds;
 
   while (bcIter != bcStop) {
-    auto const pop = reinterpret_cast<const Op*>(bcIter);
-    auto const off = func->unit()->offsetOf(pop);
+    auto const off = func->unit()->offsetOf(bcIter);
 
     // First, close any protected EH regions that are past-the-end at
     // this offset.
@@ -488,14 +487,8 @@ std::string func_flag_list(const FuncInfo& finfo) {
   auto const func = finfo.func;
   std::vector<std::string> flags;
 
-  if (auto name = func->getGeneratorBodyName()) {
-    flags.push_back(
-        folly::format("hasGeneratorBody(\"{}\")", name->toCppString()).str()
-    );
-  }
   if (func->isGenerator()) flags.push_back("isGenerator");
   if (func->isAsync()) flags.push_back("isAsync");
-  if (func->isGeneratorFromClosure()) flags.push_back("isGeneratorFromClosure");
   if (func->isClosureBody()) flags.push_back("isClosureBody");
   if (func->isPairGenerator()) flags.push_back("isPairGenerator");
 

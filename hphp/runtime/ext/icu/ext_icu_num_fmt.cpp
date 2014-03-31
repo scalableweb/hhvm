@@ -139,7 +139,7 @@ void NumberFormatter::setNumberFormatter(const String& locale,
   if (U_FAILURE(error)) {
     s_intl_error->setError(error,
         "numfmt_create: error converting pattern to UTF-16");
-    throwException("%s", s_intl_error->getErrorMessage().c_str());
+    throw getException("%s", s_intl_error->getErrorMessage().c_str());
   }
 
   const String loc(localeOrDefault(locale));
@@ -152,7 +152,7 @@ void NumberFormatter::setNumberFormatter(const String& locale,
   if (U_FAILURE(error)) {
     s_intl_error->setError(error,
         "numfmt_create: number formatter creation failed");
-    throwException("%s", s_intl_error->getErrorMessage().c_str());
+    throw getException("%s", s_intl_error->getErrorMessage().c_str());
   }
 }
 
@@ -160,14 +160,14 @@ void NumberFormatter::setNumberFormatter(const NumberFormatter *orig) {
   if (!orig || !orig->formatter()) {
     s_intl_error->setError(U_ILLEGAL_ARGUMENT_ERROR,
                            "Cannot clone unconstructed NumberFormatter");
-    throwException("%s", s_intl_error->getErrorMessage(false).c_str());
+    throw getException("%s", s_intl_error->getErrorMessage(false).c_str());
   }
   UErrorCode error = U_ZERO_ERROR;
   m_formatter = unum_clone(orig->formatter(), &error);
   if (U_FAILURE(error)) {
     s_intl_error->setError(error, "numfmt_clone: "
                                   "number formatter clone failed");
-    throwException("%s", s_intl_error->getErrorMessage().c_str());
+    throw getException("%s", s_intl_error->getErrorMessage().c_str());
   }
 }
 
@@ -274,7 +274,7 @@ static Variant doFormat(NumberFormatter *obj, double val) {
   return ret;
 }
 
-static Variant HHVM_METHOD(NumberFormatter, format, CVarRef value,
+static Variant HHVM_METHOD(NumberFormatter, format, const Variant& value,
                           int64_t type) {
   NUMFMT_GET(obj, this_, false);
   Variant num(value); // De-const
@@ -491,7 +491,7 @@ static Variant HHVM_METHOD(NumberFormatter, parse,
 }
 
 static bool HHVM_METHOD(NumberFormatter, setAttribute,
-                        int64_t attr, CVarRef value) {
+                        int64_t attr, const Variant& value) {
   NUMFMT_GET(obj, this_, false);
   switch (attr) {
     case UNUM(PARSE_INT_ONLY):

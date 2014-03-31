@@ -104,7 +104,8 @@ struct HhbcTranslator {
   // Inlining-related functions.
   void beginInlining(unsigned numArgs,
                      const Func* target,
-                     Offset returnBcOffset);
+                     Offset returnBcOffset,
+                     Type retTypePred = Type::Gen);
   bool isInlining() const;
   int inliningDepth() const;
   void profileFunctionEntry(const char* category);
@@ -167,6 +168,7 @@ struct HhbcTranslator {
   void emitTrue();
   void emitFalse();
   void emitCGetL(int32_t id);
+  void emitFPassL(int32_t id);
   void emitPushL(uint32_t id);
   void emitCGetL2(int32_t id);
   void emitCGetS();
@@ -191,9 +193,8 @@ struct HhbcTranslator {
   // The subOp param can be one of either
   // Add, Sub, Mul, Div, Mod, Shl, Shr, Concat, BitAnd, BitOr, BitXor
   void emitSetOpL(Op subOp, uint32_t id);
-  // the pre & inc params encode the 4 possible sub opcodes:
-  // PreInc, PostInc, PreDec, PostDec
-  void emitIncDecL(bool pre, bool inc, uint32_t id);
+  // the pre, inc, and over params encode the 8 possible sub opcodes
+  void emitIncDecL(bool pre, bool inc, bool over, uint32_t id);
   void emitPopA();
   void emitPopC();
   void emitPopV();
@@ -244,6 +245,7 @@ struct HhbcTranslator {
                                 bool shouldFatal,
                                 SSATmp* extraSpill = nullptr);
   void emitFPushClsMethodF(int32_t numParams);
+  SSATmp* emitAllocObjFast(const Class* cls);
   void emitFPushCtorD(int32_t numParams, int32_t classNameStrId);
   void emitFPushCtor(int32_t numParams);
   void emitFPushCtorCommon(SSATmp* cls,
@@ -298,7 +300,7 @@ struct HhbcTranslator {
   void emitPredictTL(int32_t id, AssertTOp);
   void emitPredictTStk(int32_t offset, AssertTOp);
 
-  // binary arithmetic ops
+  // arithmetic ops
   void emitAdd();
   void emitSub();
   void emitMul();
@@ -312,6 +314,9 @@ struct HhbcTranslator {
   void emitSqrt();
   void emitShl();
   void emitShr();
+  void emitAddO();
+  void emitSubO();
+  void emitMulO();
 
   // boolean ops
   void emitXor();
@@ -382,16 +387,13 @@ struct HhbcTranslator {
   void emitVerifyParamType(uint32_t paramId);
 
   // continuations
-  void emitCreateCont();
-  void emitContEnter(int32_t returnBcOffset);
-  void emitUnpackCont();
+  void emitCreateCont(Offset resumeOffset);
   void emitContReturnControl();
-  void emitContSuspendImpl(int64_t labelId);
-  void emitContSuspend(int64_t labelId);
-  void emitContSuspendK(int64_t labelId);
+  void emitContSuspendImpl(Offset resumeOffset);
+  void emitContSuspend(Offset resumeOffset);
+  void emitContSuspendK(Offset resumeOffset);
   void emitContRetC();
   void emitContCheck(bool checkStarted);
-  void emitContRaise();
   void emitContValid();
   void emitContKey();
   void emitContCurrent();
@@ -399,9 +401,8 @@ struct HhbcTranslator {
 
   // async functions
   void emitAsyncAwait();
-  void emitAsyncESuspend(int64_t labelId, int iters);
+  void emitAsyncESuspend(Offset resumeOffset, int iters);
   void emitAsyncWrapResult();
-  void emitAsyncWrapException();
 
   void emitStrlen();
   void emitIncStat(int32_t counter, int32_t value, bool force);
@@ -662,7 +663,7 @@ private:
   SSATmp* emitJmpCondHelper(int32_t offset, bool negate, SSATmp* src);
   void emitJmpHelper(int32_t taken, int32_t next, bool negate,
                      bool bothPaths, SSATmp* src);
-  SSATmp* emitIncDec(bool pre, bool inc, SSATmp* src);
+  SSATmp* emitIncDec(bool pre, bool inc, bool over, SSATmp* src);
   template<class Lambda>
   SSATmp* emitIterInitCommon(int offset, Lambda genFunc, bool invertCond);
   BCMarker makeMarker(Offset bcOff);
@@ -758,7 +759,7 @@ public:
   Offset      bcOff()       const { return m_bcStateStack.back().bcOff; }
   SrcKey      curSrcKey()   const { return SrcKey(curFunc(), bcOff()); }
   bool        inGenerator() const { return m_bcStateStack.back().inGenerator; }
-  size_t      spOffset(  )  const;
+  size_t      spOffset()    const;
   Type        topType(uint32_t i, TypeConstraint c = DataTypeSpecific) const;
 
 private:

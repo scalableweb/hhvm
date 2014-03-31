@@ -21,9 +21,10 @@
 #include "hphp/runtime/ext/ext_collections.h"
 #include "hphp/runtime/vm/member-operations.h"
 #include "hphp/runtime/vm/type-constraint.h"
+#include "hphp/runtime/vm/unit-util.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
-#include "hphp/runtime/vm/jit/translator-x64-internal.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mc-generator-internal.h"
 #include "hphp/runtime/base/stats.h"
 
 namespace HPHP {
@@ -39,7 +40,7 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
                                  StringData* name,
                                  bool& inited) {
   assert(closure->instanceof(c_Closure::classof()));
-  String str(StringData::Make(s_staticPrefix->slice(), name->slice()));
+  String str(StringData::Make(s_staticPrefix.slice(), name->slice()));
   auto const cls = closure->getVMClass();
   auto const slot = cls->lookupDeclProp(str.get());
   assert(slot != kInvalidSlot);
@@ -122,6 +123,25 @@ void setNewElemArray(TypedValue* base, Cell val) {
   HPHP::SetNewElemArray(base, &val);
 }
 
+TypedValue setOpElem(TypedValue* base, TypedValue key,
+                     Cell val, MInstrState* mis, SetOpOp op) {
+  TypedValue* result =
+    HPHP::SetOpElem(mis->tvScratch, mis->tvRef, op, base, key, &val);
+
+  Cell ret;
+  cellDup(*tvToCell(result), ret);
+  return ret;
+}
+
+TypedValue incDecElem(TypedValue* base, TypedValue key,
+                      MInstrState* mis, IncDecOp op) {
+  TypedValue result;
+  HPHP::IncDecElem<true>(
+    mis->tvScratch, mis->tvRef, op, base, key, result);
+  assert(result.m_type != KindOfRef);
+  return result;
+}
+
 void bindNewElemIR(TypedValue* base, RefData* val, MInstrState* mis) {
   base = HPHP::NewElem(mis->tvScratch, mis->tvRef, base);
   if (!(base == &mis->tvScratch && base->m_type == KindOfUninit)) {
@@ -130,6 +150,7 @@ void bindNewElemIR(TypedValue* base, RefData* val, MInstrState* mis) {
 }
 
 RefData* boxValue(TypedValue tv) {
+  if (tv.m_type == KindOfUninit) tv = make_tv<KindOfNull>();
   return RefData::Make(tv);
 }
 
@@ -347,11 +368,8 @@ void VerifyRetTypeFail(TypedValue tv) {
 
 RefData* closureStaticLocInit(StringData* name, ActRec* fp, TypedValue val) {
   auto const func = fp->m_func;
-  assert(func->isClosureBody() || func->isGeneratorFromClosure());
-  auto const closureLoc =
-    LIKELY(func->isClosureBody())
-      ? frame_local(fp, func->numParams())
-      : frame_local(fp, func->getGeneratorOrigFunc()->numParams());
+  assert(func->isClosureBody());
+  auto const closureLoc = frame_local(fp, func->numParams());
 
   bool inited;
   auto const refData = lookupStaticFromClosure(
@@ -382,18 +400,18 @@ int64_t ak_exist_int(ArrayData* arr, int64_t key) {
 
 int64_t ak_exist_string_obj(ObjectData* obj, StringData* key) {
   if (obj->isCollection()) {
-    return collectionOffsetContains(obj, key);
+    return collectionContains(obj, key);
   }
-  CArrRef arr = obj->o_toArray();
+  const Array& arr = obj->o_toArray();
   int64_t res = ak_exist_string_impl(arr.get(), key);
   return res;
 }
 
 int64_t ak_exist_int_obj(ObjectData* obj, int64_t key) {
   if (obj->isCollection()) {
-    return collectionOffsetContains(obj, key);
+    return collectionContains(obj, key);
   }
-  CArrRef arr = obj->o_toArray();
+  const Array& arr = obj->o_toArray();
   bool res = arr.get()->exists(key);
   return res;
 }
@@ -514,7 +532,7 @@ TCA sswitchHelperFast(const StringData* val,
 
 // TODO(#2031980): clear these out
 void tv_release_generic(TypedValue* tv) {
-  assert(JIT::tx64->stateIsDirty());
+  assert(JIT::tx->stateIsDirty());
   assert(tv->m_type == KindOfString || tv->m_type == KindOfArray ||
          tv->m_type == KindOfObject || tv->m_type == KindOfResource ||
          tv->m_type == KindOfRef);
@@ -818,7 +836,7 @@ const Func* lookupUnknownFunc(const StringData* name) {
   JIT::VMRegAnchor _;
   auto const func = Unit::loadFunc(name);
   if (UNLIKELY(!func)) {
-    raise_error("Undefined function: %s", name->data());
+    raise_error("Call to undefined function %s()", name->data());
   }
   return func;
 }
@@ -904,7 +922,7 @@ static void sync_regstate_to_caller(ActRec* preLive) {
   auto const ec = g_context.getNoCheck();
   ec->m_stack.top() = (TypedValue*)preLive - preLive->numArgs();
   ActRec* fp = preLive == ec->m_firstAR ?
-    ec->m_nestedVMs.back().m_savedState.fp : (ActRec*)preLive->m_savedRbp;
+    ec->m_nestedVMs.back().fp : (ActRec*)preLive->m_savedRbp;
   ec->m_fp = fp;
   ec->m_pc = fp->m_func->unit()->at(fp->m_func->base() + preLive->m_soff);
   tl_regState = VMRegState::CLEAN;

@@ -27,6 +27,7 @@
 #include "hphp/runtime/base/tv-comparisons.h"
 #include "hphp/runtime/base/tv-conversions.h"
 #include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/vm/unit-util.h"
 
 #include "hphp/runtime/ext/ext_math.h" // f_abs
 
@@ -60,6 +61,7 @@ namespace {
 
 const StaticString s_Exception("Exception");
 const StaticString s_Continuation("Continuation");
+const StaticString s_empty("");
 
 //////////////////////////////////////////////////////////////////////
 
@@ -350,6 +352,9 @@ void in(ISS& env, const bc::Mod& op)    { arithImpl(env, op, typeMod); }
 void in(ISS& env, const bc::BitAnd& op) { arithImpl(env, op, typeBitAnd); }
 void in(ISS& env, const bc::BitOr& op)  { arithImpl(env, op, typeBitOr); }
 void in(ISS& env, const bc::BitXor& op) { arithImpl(env, op, typeBitXor); }
+void in(ISS& env, const bc::AddO& op)   { arithImpl(env, op, typeAddO); }
+void in(ISS& env, const bc::SubO& op)   { arithImpl(env, op, typeSubO); }
+void in(ISS& env, const bc::MulO& op)   { arithImpl(env, op, typeMulO); }
 
 template<class Op, class Fun>
 void shiftImpl(ISS& env, const Op& op, Fun fop) {
@@ -389,8 +394,7 @@ void in(ISS& env, const bc::BitNot& op) {
 template<bool Negate>
 void sameImpl(ISS& env) {
   nothrow(env);
-  // TODO(#3783145): should constprop this
-
+  constprop(env);
   auto const t1 = popC(env);
   auto const t2 = popC(env);
   auto const v1 = tv(t1);
@@ -444,10 +448,10 @@ void in(ISS& env, const bc::Xor&) {
 
 void castBoolImpl(ISS& env, bool negate) {
   nothrow(env);
+  constprop(env);
   auto const t = popC(env);
   auto const v = tv(t);
   if (v) {
-    constprop(env);
     return push(env, eval_cell([&] {
       return make_tv<KindOfBoolean>(cellToBool(*v) != negate);
     }));
@@ -455,15 +459,24 @@ void castBoolImpl(ISS& env, bool negate) {
   push(env, TBool);
 }
 
-void in(ISS& env, const bc::Not&)      { castBoolImpl(env, true); }
-void in(ISS& env, const bc::CastBool&) { castBoolImpl(env, false); }
+void in(ISS& env, const bc::Not&) {
+  castBoolImpl(env, true);
+}
+
+void in(ISS& env, const bc::CastBool&) {
+  auto const t = topC(env);
+  if (t.subtypeOf(TBool)) return reduce(env, bc::Nop {});
+  castBoolImpl(env, false);
+}
 
 void in(ISS& env, const bc::CastInt&) {
-  auto const t = popC(env);
-  if (!t.couldBe(TObj) && !t.couldBe(TRes)) nothrow(env);
-  auto const v = tv(t);
-  if (v) {
-    constprop(env);
+  constprop(env);
+  auto const t = topC(env);
+  if (t.subtypeOf(TInt)) return reduce(env, bc::Nop {});
+  popC(env);
+  // Objects can raise a warning about converting to int.
+  if (!t.couldBe(TObj)) nothrow(env);
+  if (auto const v = tv(t)) {
     return push(env, eval_cell([&] {
       return make_tv<KindOfInt64>(cellToInt(*v));
     }));
@@ -471,18 +484,27 @@ void in(ISS& env, const bc::CastInt&) {
   push(env, TInt);
 }
 
-void in(ISS& env, const bc::CastDouble&) { popC(env); push(env, TDbl); }
-void in(ISS& env, const bc::CastString&) { popC(env); push(env, TStr); }
-void in(ISS& env, const bc::CastArray&)  { popC(env); push(env, TArr); }
-void in(ISS& env, const bc::CastObject&) { popC(env); push(env, TObj); }
+void castImpl(ISS& env, Type target) {
+  auto const t = topC(env);
+  if (t.subtypeOf(target)) return reduce(env, bc::Nop {});
+  constprop(env);
+  // TODO(#3875556): constant evaluate conversions when we can.
+  popC(env);
+  push(env, target);
+}
+
+void in(ISS& env, const bc::CastDouble&) { castImpl(env, TDbl); }
+void in(ISS& env, const bc::CastString&) { castImpl(env, TStr); }
+void in(ISS& env, const bc::CastArray&)  { castImpl(env, TArr); }
+void in(ISS& env, const bc::CastObject&) { castImpl(env, TObj); }
 
 void in(ISS& env, const bc::Print& op) { popC(env); push(env, ival(1)); }
 
 void in(ISS& env, const bc::Clone& op) {
   auto const val = popC(env);
   push(env, val.subtypeOf(TObj) ? val :
-       is_opt(val)         ? unopt(val) :
-       TObj);
+            is_opt(val)         ? unopt(val) :
+            TObj);
 }
 
 void in(ISS& env, const bc::Exit&)  { popC(env); push(env, TInitNull); }
@@ -623,6 +645,18 @@ void group(ISS& env,
   setLoc(env, cgetl.loc1, negate ? was_true : was_false);
   env.propagate(*jmp.target, env.state);
   setLoc(env, cgetl.loc1, negate ? was_false : was_true);
+}
+
+void group(ISS& env,
+           const bc::CGetL& cgetl,
+           const bc::FPushObjMethodD& fpush) {
+  auto const obj = locAsCell(env, cgetl.loc1);
+  impl(env, cgetl, fpush);
+  if (!is_specialized_obj(obj)) {
+    setLoc(env, cgetl.loc1, TObj);
+  } else if (is_opt(obj)) {
+    setLoc(env, cgetl.loc1, unopt(obj));
+  }
 }
 
 void in(ISS& env, const bc::Switch& op) {
@@ -1030,20 +1064,20 @@ void in(ISS& env, const bc::IncDecL& op) {
     return push(env, TInitCell);
   }
 
-  auto const subop = op.subop;
-  auto const pre = subop == IncDecOp::PreInc || subop == IncDecOp::PreDec;
-  auto const inc = subop == IncDecOp::PreInc || subop == IncDecOp::PostInc;
+  auto const pre = isPre(op.subop);
+  auto const inc = isInc(op.subop);
+  auto const over = isIncDecO(op.subop);
 
   if (!pre) push(env, loc);
 
   // We can't constprop with this eval_cell, because of the effects
   // on locals.
-  auto resultTy = eval_cell([inc,val] {
+  auto resultTy = eval_cell([inc,over,val] {
     auto c = *val;
     if (inc) {
-      cellInc(c);
+      (over ? cellIncO : cellInc)(c);
     } else {
-      cellDec(c);
+      (over ? cellDecO : cellDec)(c);
     }
     return c;
   });
@@ -1175,7 +1209,7 @@ void in(ISS& env, const bc::UnsetG& op) {
 
 void in(ISS& env, const bc::FPushFuncD& op) {
   auto const rfunc = env.index.resolve_func(env.ctx, op.str2);
-  fpiPush(env, ActRec { FPIKind::Func, rfunc });
+  fpiPush(env, ActRec { FPIKind::Func, folly::none, rfunc });
 }
 
 void in(ISS& env, const bc::FPushFunc& op) {
@@ -1201,8 +1235,11 @@ void in(ISS& env, const bc::FPushFuncU& op) {
 
 void in(ISS& env, const bc::FPushObjMethodD& op) {
   auto const obj = popC(env);
+  folly::Optional<res::Class> rcls;
+  if (obj.strictSubtypeOf(TObj)) rcls = dcls_of(objcls(obj)).cls;
   fpiPush(env, ActRec {
     FPIKind::ObjMeth,
+    rcls,
     obj.subtypeOf(TObj)
       ? env.index.resolve_method(env.ctx, objcls(obj), op.str2)
       : folly::none
@@ -1226,7 +1263,7 @@ void in(ISS& env, const bc::FPushClsMethodD& op) {
   auto const rfun =
     rcls ? env.index.resolve_method(env.ctx, clsExact(*rcls), op.str2)
          : folly::none;
-  fpiPush(env, ActRec { FPIKind::ClsMeth, rfun });
+  fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfun });
 }
 
 void in(ISS& env, const bc::FPushClsMethod& op) {
@@ -1237,7 +1274,9 @@ void in(ISS& env, const bc::FPushClsMethod& op) {
     v2 && v2->m_type == KindOfStaticString
       ? env.index.resolve_method(env.ctx, t1, v2->m_data.pstr)
       : folly::none;
-  fpiPush(env, ActRec { FPIKind::ClsMeth, rfunc });
+  folly::Optional<res::Class> rcls;
+  if (t1.strictSubtypeOf(TCls)) rcls = dcls_of(t1).cls;
+  fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfunc });
 }
 
 void in(ISS& env, const bc::FPushClsMethodF& op) {
@@ -1251,7 +1290,7 @@ void in(ISS& env, const bc::FPushCtorD& op) {
   push(env, rcls ? objExact(*rcls) : TObj);
   auto const rfunc =
     rcls ? env.index.resolve_ctor(env.ctx, *rcls) : folly::none;
-  fpiPush(env, ActRec { FPIKind::Ctor, rfunc });
+  fpiPush(env, ActRec { FPIKind::Ctor, rcls, rfunc });
 }
 
 void in(ISS& env, const bc::FPushCtor& op) {
@@ -1418,6 +1457,43 @@ void in(ISS& env, const bc::FPassM& op) {
 }
 
 void in(ISS& env, const bc::FCall& op) {
+  auto const ar = fpiTop(env);
+  if (ar.func) {
+    switch (ar.kind) {
+    case FPIKind::Unknown:
+    case FPIKind::CallableArr:
+    case FPIKind::ObjInvoke:
+      not_reached();
+    case FPIKind::Func:
+      return reduce(
+        env,
+        bc::FCallD { op.arg1, s_empty.get(), ar.func->name() }
+      );
+    case FPIKind::Ctor:
+    case FPIKind::ObjMeth:
+    case FPIKind::ClsMeth:
+      /*
+       * If we have a resolved func and it's a class method (or
+       * ctor), we currently must also have a resolved class.  This
+       * could change later, but this code will need to be revisited
+       * in that case, so assert.
+       */
+      always_assert(ar.cls.hasValue() &&
+        "resolved func without a resolved class");
+      return reduce(
+        env,
+        bc::FCallD { op.arg1, ar.cls->name(), ar.func->name() }
+      );
+    }
+  }
+
+  for (auto i = uint32_t{0}; i < op.arg1; ++i) popF(env);
+  fpiPop(env);
+  specialFunctionEffects(env, ar);
+  push(env, TInitGen);
+}
+
+void in(ISS& env, const bc::FCallD& op) {
   for (auto i = uint32_t{0}; i < op.arg1; ++i) popF(env);
   auto const ar = fpiPop(env);
   specialFunctionEffects(env, ar);
@@ -1473,6 +1549,11 @@ void in(ISS& env, const bc::IterInit& op) {
   // below.
   freeIter(env, op.iter1);
   env.propagate(*op.target, env.state);
+  if (t1.subtypeOf(TArrE)) {
+    nothrow(env);
+    nofallthrough(env);
+    return;
+  }
   auto ity = iter_types(t1);
   setLoc(env, op.loc3, ity.second);
   setIter(env, op.iter1, TrackedIter { std::move(ity) });
@@ -1488,6 +1569,11 @@ void in(ISS& env, const bc::IterInitK& op) {
   auto const t1 = popC(env);
   freeIter(env, op.iter1);
   env.propagate(*op.target, env.state);
+  if (t1.subtypeOf(TArrE)) {
+    nothrow(env);
+    nofallthrough(env);
+    return;
+  }
   auto ity = iter_types(t1);
   setLoc(env, op.loc3, ity.second);
   setLoc(env, op.loc4, ity.first);
@@ -1518,13 +1604,17 @@ void in(ISS& env, const bc::WIterInitK& op) {
 }
 
 void in(ISS& env, const bc::IterNext& op) {
+  auto const curLoc3 = locRaw(env, op.loc3);
+
   match<void>(
     env.state.iters[op.iter1->id],
     [&] (UnknownIter)           { setLoc(env, op.loc3, TInitCell); },
     [&] (const TrackedIter& ti) { setLoc(env, op.loc3, ti.kv.second); }
   );
   env.propagate(*op.target, env.state);
+
   freeIter(env, op.iter1);
+  setLocRaw(env, op.loc3, curLoc3);
 }
 
 void in(ISS& env, const bc::MIterNext& op) {
@@ -1533,6 +1623,9 @@ void in(ISS& env, const bc::MIterNext& op) {
 }
 
 void in(ISS& env, const bc::IterNextK& op) {
+  auto const curLoc3 = locRaw(env, op.loc3);
+  auto const curLoc4 = locRaw(env, op.loc4);
+
   match<void>(
     env.state.iters[op.iter1->id],
     [&] (UnknownIter) {
@@ -1545,7 +1638,10 @@ void in(ISS& env, const bc::IterNextK& op) {
     }
   );
   env.propagate(*op.target, env.state);
+
   freeIter(env, op.iter1);
+  setLocRaw(env, op.loc3, curLoc3);
+  setLocRaw(env, op.loc4, curLoc4);
 }
 
 void in(ISS& env, const bc::MIterNextK& op) {
@@ -1727,48 +1823,37 @@ void in(ISS& env, const bc::CreateCl& op) {
   push(env, TObj);
 }
 
-void in(ISS& env, const bc::CreateCont&) {
-  killLocals(env);
-  if (env.ctx.func->isClosureBody) {
-    // Generator closures create functions *outside* the class that
-    // the closure is in, and we haven't hooked that up to be part
-    // of the class-at-a-time analysis.  So we need to kill
-    // everything on $this/self.
-    killThisProps(env);
-    killSelfProps(env);
-  }
+void in(ISS& env, const bc::CreateCont& op) {
+  // Resume point of this Continuation.
+  push(env, TInitNull);
+  env.propagate(*op.target, env.state);
+  popC(env);
+
+  // Normal execution flow.
+  unsetLocals(env);
   push(env, objExact(env.index.builtin_class(s_Continuation.get())));
 }
 
 void in(ISS& env, const bc::ContEnter&) { popC(env); }
-
-void in(ISS& env, const bc::UnpackCont&) {
-  readUnknownLocals(env);
-  push(env, TInitCell);
-  push(env, TInt);
-}
+void in(ISS& env, const bc::ContRaise&) { popC(env); }
 
 void in(ISS& env, const bc::ContSuspend&) {
-  readUnknownLocals(env);
   popC(env);
-  doRet(env, TInitGen);
+  push(env, TInitCell);
 }
 
 void in(ISS& env, const bc::ContSuspendK&) {
-  readUnknownLocals(env);
   popC(env);
   popC(env);
-  doRet(env, TInitGen);
+  push(env, TInitCell);
 }
 
 void in(ISS& env, const bc::ContRetC&) {
-  readUnknownLocals(env);
   popC(env);
-  doRet(env, TInitGen);
+  doRet(env, TBottom);
 }
 
 void in(ISS& env, const bc::ContCheck&)   {}
-void in(ISS& env, const bc::ContRaise&)   {}
 void in(ISS& env, const bc::ContValid&)   { push(env, TBool); }
 void in(ISS& env, const bc::ContKey&)     { push(env, TInitCell); }
 void in(ISS& env, const bc::ContCurrent&) { push(env, TInitCell); }
@@ -1787,25 +1872,39 @@ void in(ISS& env, const bc::AsyncWrapResult&) {
   push(env, wait_handle(env.index, t));
 }
 
-void in(ISS& env, const bc::AsyncESuspend&) {
+void in(ISS& env, const bc::AsyncESuspend& op) {
+  auto const t = popC(env);
+
+  // Resume point of this async function.
+  if (!is_specialized_wait_handle(t) || is_opt(t)) {
+    // Uninferred garbage?
+    push(env, TInitCell);
+    env.propagate(*op.target, env.state);
+    popC(env);
+  } else {
+    auto const inner = wait_handle_inner(t);
+    if (!inner.subtypeOf(TBottom)) {
+      // A wait handle not known to always throw?
+      push(env, inner);
+      env.propagate(*op.target, env.state);
+      popC(env);
+    }
+  }
+
   /*
    * A suspended async function WaitHandle must end up returning
-   * whatever type we infer the eager function will return, so we
-   * don't want it to influence that type.  Using WaitH<Bottom>
-   * handles this, but note that it relies on the rule that the only
-   * thing you can do with the output of this opcode is pass it to
-   * RetC.
+   * whatever type we infer the eagerly executed part of the function
+   * will return, so we don't want it to influence that type.  Using
+   * WaitH<Bottom> handles this, but note that it relies on the rule
+   * that the only thing you can do with the output of this opcode
+   * is pass it to RetC.
    */
-  unsetNamedLocals(env);
-  popC(env);
+  unsetLocals(env);
   push(env, wait_handle(env.index, TBottom));
 }
 
-void in(ISS& env, const bc::AsyncWrapException&) {
-  // A wait handle which always throws when you join it is
-  // represented as a WaitH<Bottom>.
-  popC(env);
-  push(env, wait_handle(env.index, TBottom));
+void in(ISS& env, const bc::AsyncResume&)  {
+  // Can throw, async function can resume here with an exception.
 }
 
 void in(ISS& env, const bc::Strlen&) {
@@ -1939,6 +2038,9 @@ void interpStep(ISS& env, Iterator& it, Iterator stop) {
         return group(env, it, it[0].CGetL, it[1].InstanceOfD, it[2].JmpNZ);
       default: break;
       }
+      break;
+    case Op::FPushObjMethodD:
+      return group(env, it, it[0].CGetL, it[1].FPushObjMethodD);
     default: break;
     }
     break;
@@ -1972,18 +2074,16 @@ template<class Iterator>
 StepFlags interpOps(Interp& interp,
                     Iterator& iter, Iterator stop,
                     PropagateFn propagate) {
-  auto propagateThrow = [&] (const State& state) {
-    for (auto& factored : interp.blk->factoredExits) {
-      propagate(*factored, without_stacks(state));
-    }
-  };
-
   auto flags = StepFlags{};
   ISS env { interp, flags, propagate };
 
-  // Make a copy of the state (except stacks) in case we need to
-  // propagate across factored exits (if it's a PEI).
-  auto const stateBefore = without_stacks(interp.state);
+  // If there are factored edges, make a copy of the state (except
+  // stacks) in case we need to propagate across factored exits (if
+  // it's a PEI).
+  auto const stateBefore = interp.blk->factoredExits.empty()
+    ? State{}
+    : without_stacks(interp.state);
+
   auto const numPushed   = iter->numPush();
   interpStep(env, iter, stop);
   if (flags.wasPEI) {
@@ -1999,7 +2099,9 @@ StepFlags interpOps(Interp& interp,
       FTRACE(2, "   nothrow (due to constprop)\n");
     } else {
       FTRACE(2, "   PEI.\n");
-      propagateThrow(stateBefore);
+      for (auto& factored : interp.blk->factoredExits) {
+        propagate(*factored, stateBefore);
+      }
     }
   }
   return flags;

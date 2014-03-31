@@ -17,12 +17,13 @@
 #ifndef incl_HPHP_REF_DATA_H
 #define incl_HPHP_REF_DATA_H
 
-#ifndef incl_HPHP_INSIDE_HPHP_COMPLEX_TYPES_H_
-#error Directly including 'ref_data.h' is prohibited. \
-       Include 'complex_types.h' instead.
-#endif
+#include "hphp/runtime/base/countable.h"
+#include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
+
+class Variant;
 
 /*
  * We heap allocate a RefData when we make a reference to something.
@@ -104,17 +105,18 @@ struct RefData {
 
   IMPLEMENT_COUNTABLENF_METHODS_NO_STATIC
 
-  // Memory allocator methods
-  void dump() const;
+  /*
+   * Note, despite the name, this can never return a non-Cell.
+   */
+  const Cell* tv() const {
+    assert(m_magic == Magic::kMagic);
+    return &m_tv;
+  }
+  Cell* tv() {
+    assert(m_magic == Magic::kMagic);
+    return &m_tv;
+  }
 
-  const TypedValue* tv() const {
-    assert(m_magic == Magic::kMagic);
-    return &m_tv;
-  }
-  TypedValue* tv() {
-    assert(m_magic == Magic::kMagic);
-    return &m_tv;
-  }
   const Variant* var() const { return (const Variant*)tv(); }
   Variant* var() { return reinterpret_cast<Variant*>(tv()); }
 
@@ -125,17 +127,10 @@ struct RefData {
     not_reached();
 #endif
   }
-  static constexpr ptrdiff_t tvOffset() { return offsetof(RefData, m_tv); }
+  static constexpr int tvOffset() { return offsetof(RefData, m_tv); }
 
   void assertValid() const {
     assert(m_magic == Magic::kMagic);
-  }
-
-  // TODO: t2221110: get rid of this hack.
-  static RefData* refDataFromVariantIfYouDare(const Variant* var) {
-    RefData* ref = reinterpret_cast<RefData*>(uintptr_t(var) - tvOffset());
-    ref->assertValid();
-    return ref;
   }
 
   int32_t getRealCount() const {
@@ -264,13 +259,7 @@ public:
   ~RefData();
 
 private:
-  static void compileTimeAsserts() {
-    static_assert(offsetof(RefData, m_count) ==
-                  FAST_REFCOUNT_OFFSET, "");
-    static_assert(sizeof(RefData::m_count) ==
-                  TypedValueAux::auxSize, "");
-    static_assert(sizeof(DataType) == 1, "required for m_cow/z packing");
-  }
+  static void compileTimeAsserts();
 
 #if defined(DEBUG) || defined(PACKED_TV)
 private:

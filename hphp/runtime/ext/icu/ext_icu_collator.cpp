@@ -55,7 +55,7 @@ static bool HHVM_METHOD(Collator, asort, VRefParam arr, int64_t flag) {
   return ret;
 }
 
-static Variant HHVM_METHOD(Collator, compare, CVarRef str1, CVarRef str2) {
+static Variant HHVM_METHOD(Collator, compare, const Variant& str1, const Variant& str2) {
   FETCH_COL(data, this_);
   data->clearError();
   UErrorCode error = U_ZERO_ERROR;
@@ -127,6 +127,35 @@ static bool HHVM_METHOD(Collator, setAttribute, int64_t attr, int64_t val) {
     return false;
   }
   return true;
+}
+
+static Variant HHVM_METHOD(Collator, getSortKey, const String& val) {
+  FETCH_COL(data, this_);
+  UErrorCode error = U_ZERO_ERROR;
+  icu::UnicodeString strval(u16(val, error));
+  if (U_FAILURE(error)) {
+    return false;
+  }
+
+  int sortkey_len = ucol_getSortKey(data->collator(),
+                                    strval.getBuffer(), strval.length(),
+                                    nullptr,
+                                    0);
+  if (sortkey_len <= 0) {
+    return false;
+  }
+
+  String ret(sortkey_len + 1, ReserveString);
+  sortkey_len = ucol_getSortKey(data->collator(),
+                                strval.getBuffer(), strval.length(),
+                                (uint8_t*) ret.get()->mutableData(),
+                                ret.get()->capacity());
+  if (sortkey_len <= 0) {
+    return false;
+  }
+
+  ret.setSize(sortkey_len);
+  return ret;
 }
 
 static bool HHVM_METHOD(Collator, setStrength, int64_t strength) {
@@ -294,6 +323,7 @@ void IntlExtension::initCollator() {
   HHVM_ME(Collator, getErrorCode);
   HHVM_ME(Collator, getErrorMessage);
   HHVM_ME(Collator, getLocale);
+  HHVM_ME(Collator, getSortKey);
   HHVM_ME(Collator, getStrength);
   HHVM_ME(Collator, setAttribute);
   HHVM_ME(Collator, setStrength);

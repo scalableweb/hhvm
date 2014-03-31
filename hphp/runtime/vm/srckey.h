@@ -16,11 +16,12 @@
 #ifndef incl_HPHP_SRCKEY_H_
 #define incl_HPHP_SRCKEY_H_
 
-#include <tuple>
-#include <boost/operators.hpp>
+#include "hphp/runtime/base/types.h"
 
 #include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include <boost/operators.hpp>
+#include <tuple>
 
 namespace HPHP {
 
@@ -44,7 +45,7 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
     , m_offset(off)
   {}
 
-  SrcKey(const Func* f, const Opcode* i)
+  SrcKey(const Func* f, PC i)
     : m_funcId(f->getFuncId())
     , m_offset(f->unit()->offsetOf(i))
   {}

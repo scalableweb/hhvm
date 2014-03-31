@@ -16,6 +16,7 @@
 */
 
 #include "hphp/runtime/ext/ext_xmlreader.h"
+#include "hphp/runtime/ext/ext_domdocument.h"
 
 
 #include "hphp/util/functional.h"
@@ -286,7 +287,7 @@ String c_XMLReader::t_readinnerxml() {
 }
 
 String c_XMLReader::t_readouterxml() {
-  return read_string_func(xmlTextReaderReadString);
+  return read_string_func(xmlTextReaderReadOuterXml);
 }
 
 bool c_XMLReader::bool_func_no_arg(xmlreader_read_int_t internal_function) {
@@ -521,7 +522,7 @@ public:
     }
   }
 
-  PropertyAccessor* get(CVarRef name) {
+  PropertyAccessor* get(const Variant& name) {
     if (name.isString()) {
       const_iterator iter = find(name.toString().data());
       if (iter != end()) {
@@ -588,6 +589,42 @@ Variant c_XMLReader::t___get(Variant name) {
       return uninit_null();
   }
   return uninit_null();
+}
+
+Variant c_XMLReader::t_expand(const Object& basenode /* = null */) {
+  p_DOMDocument doc;
+  xmlDocPtr docp = nullptr;
+
+  if (!basenode.isNull()) {
+    c_DOMNode *dombasenode = basenode.getTyped<c_DOMNode>();
+    doc = dombasenode->doc();
+    docp = (xmlDocPtr) doc->m_node;
+    if (docp == nullptr) {
+      raise_warning("Invalid State Error");
+      return false;
+    }
+  } else {
+    doc = (p_DOMDocument) SystemLib::AllocDOMDocumentObject();
+  }
+
+  if (m_ptr) {
+    xmlNodePtr node = xmlTextReaderExpand(m_ptr);
+    if (node == nullptr) {
+      raise_warning("An Error Occurred while expanding");
+      return false;
+    } else {
+      xmlNodePtr nodec = xmlDocCopyNode(node, docp, 1);
+      if (nodec == nullptr) {
+        raise_notice("Cannot expand this node type");
+        return false;
+      } else {
+        return php_dom_create_object(nodec, doc, false);
+      }
+    }
+  }
+
+  raise_warning("Load Data before trying to read");
+  return false;
 }
 
 Variant c_XMLReader::t___destruct() {

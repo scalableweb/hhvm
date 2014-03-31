@@ -24,8 +24,8 @@
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/jit/ir.h"
 #include "hphp/runtime/vm/jit/layout.h"
-#include "hphp/runtime/vm/jit/code-gen-x64.h"
 #include "hphp/runtime/vm/jit/block.h"
+#include "hphp/runtime/vm/jit/code-gen.h"
 #include "hphp/util/text-util.h"
 
 namespace HPHP {  namespace JIT {
@@ -114,15 +114,11 @@ void printOpcode(std::ostream& os, const IRInstruction* inst,
     if (hasExtra || isGuard) os << punc(",");
   }
 
-  if (inst->op() == LdConst) {
-    os << constToString(inst->typeParam());
-  } else {
-    if (hasExtra) {
-      os << color(ANSI_COLOR_GREEN)
-         << showExtra(inst->op(), inst->rawExtra())
-         << color(ANSI_COLOR_END);
-      if (isGuard) os << punc(",");
-    }
+  if (hasExtra) {
+    os << color(ANSI_COLOR_GREEN)
+       << showExtra(inst->op(), inst->rawExtra())
+       << color(ANSI_COLOR_END);
+    if (isGuard) os << punc(",");
   }
 
   if (isGuard) {
@@ -139,8 +135,8 @@ void printSrcs(std::ostream& os, const IRInstruction* inst,
                const RegAllocInfo* regs) {
   bool first = true;
   if (inst->op() == IncStat) {
-    os << " " << Stats::g_counterNames[inst->src(0)->getValInt()]
-       << ", " << inst->src(1)->getValInt();
+    os << " " << Stats::g_counterNames[inst->src(0)->intVal()]
+       << ", " << inst->src(1)->intVal();
     return;
   }
   for (uint32_t i = 0, n = inst->numSrcs(); i < n; i++) {
@@ -204,19 +200,22 @@ std::ostream& operator<<(std::ostream& os, const PhysLoc& loc) {
   for (int i = 0; i < sz; ++i) {
     if (!loc.spilled()) {
       PhysReg reg = loc.reg(i);
-      if (arch() == Arch::X64) {
-        auto name = reg.type() == PhysReg::GP ? reg::regname(Reg64(reg)) :
-          reg::regname(RegXMM(reg));
-        os << delim << name;
-      } else if (arch() == Arch::ARM) {
-        auto prefix =
-          reg.isGP() ? (vixl::Register(reg).size() == vixl::kXRegSize
-                        ? 'x' : 'w')
-          : (vixl::FPRegister(reg).size() == vixl::kSRegSize
-             ? 's' : 'd');
-        os << delim << prefix << int(RegNumber(reg));
-      } else {
-        not_implemented();
+      switch (arch()) {
+        case Arch::X64: {
+          auto name = reg.type() == PhysReg::GP ? reg::regname(Reg64(reg)) :
+            reg::regname(RegXMM(reg));
+          os << delim << name;
+          break;
+        }
+        case Arch::ARM: {
+          auto prefix =
+            reg.isGP() ? (vixl::Register(reg).size() == vixl::kXRegSize
+                          ? 'x' : 'w')
+            : (vixl::FPRegister(reg).size() == vixl::kSRegSize
+               ? 's' : 'd');
+          os << delim << prefix << int(RegNumber(reg));
+          break;
+        }
       }
     } else {
       os << delim << "spill[" << loc.slot(i) << "]";
@@ -247,6 +246,7 @@ std::string ShuffleData::show() const {
 void print(std::ostream& os, const SSATmp* tmp, const PhysLoc* loc) {
   if (tmp->inst()->is(DefConst)) {
     os << constToString(tmp->type());
+    if (loc) printPhysLoc(os, *loc);
     return;
   }
   os << color(ANSI_COLOR_WHITE);
@@ -275,20 +275,25 @@ void print(const SSATmp* tmp) {
 static constexpr auto kIndent = 4;
 
 static void disasmRange(std::ostream& os, TCA begin, TCA end) {
-  if (arch() == Arch::X64) {
-    Disasm disasm(Disasm::Options().indent(kIndent + 4)
-                  .printEncoding(dumpIREnabled(kExtraLevel))
-                  .color(color(ANSI_COLOR_BROWN)));
-    disasm.disasm(os, begin, end);
-  } else if (arch() == Arch::ARM) {
-    using namespace vixl;
-    Decoder dec;
-    PrintDisassembler disasm(os, kIndent + 4, dumpIREnabled(kExtraLevel),
-                             color(ANSI_COLOR_BROWN));
-    dec.AppendVisitor(&disasm);
-    assert(begin <= end);
-    for (; begin < end; begin += kInstructionSize) {
-      dec.Decode(Instruction::Cast(begin));
+  switch (arch()) {
+    case Arch::X64: {
+      Disasm disasm(Disasm::Options().indent(kIndent + 4)
+                    .printEncoding(dumpIREnabled(kExtraLevel))
+                    .color(color(ANSI_COLOR_BROWN)));
+      disasm.disasm(os, begin, end);
+      break;
+    }
+    case Arch::ARM: {
+      using namespace vixl;
+      Decoder dec;
+      PrintDisassembler disasm(os, kIndent + 4, dumpIREnabled(kExtraLevel),
+                               color(ANSI_COLOR_BROWN));
+      dec.AppendVisitor(&disasm);
+      assert(begin <= end);
+      for (; begin < end; begin += kInstructionSize) {
+        dec.Decode(Instruction::Cast(begin));
+      }
+      break;
     }
   }
 }

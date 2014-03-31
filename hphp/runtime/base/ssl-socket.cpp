@@ -19,6 +19,7 @@
 #include "hphp/runtime/base/runtime-error.h"
 #include "folly/String.h"
 #include <poll.h>
+#include <sys/time.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -336,6 +337,7 @@ SSLSocket *SSLSocket::Create(const HostURL &hosturl, double timeout) {
 }
 
 bool SSLSocket::close() {
+  invokeFiltersOnClose();
   return closeImpl();
 }
 
@@ -687,7 +689,7 @@ bool SSLSocket::checkLiveness() {
 
 const StaticString s_file("file://");
 
-BIO *Certificate::ReadData(CVarRef var, bool *file /* = NULL */) {
+BIO *Certificate::ReadData(const Variant& var, bool *file /* = NULL */) {
   if (var.isString() || var.isObject()) {
     String svar = var.toString();
     if (svar.substr(0, 7) == s_file) {
@@ -706,7 +708,7 @@ BIO *Certificate::ReadData(CVarRef var, bool *file /* = NULL */) {
 }
 
 
-Resource Certificate::Get(CVarRef var) {
+Resource Certificate::Get(const Variant& var) {
   if (var.isResource()) {
     return var.toResource();
   }

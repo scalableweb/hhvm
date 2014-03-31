@@ -205,7 +205,9 @@ static bool isLocalHost(const String& host) {
   return host.empty() || host == s_localhost || host == s_127_0_0_1;
 }
 
-bool XboxServer::SendMessage(const String& message, Variant &ret, int timeout_ms,
+bool XboxServer::SendMessage(const String& message,
+                             Array& ret,
+                             int timeout_ms,
                              const String& host /* = "localhost" */) {
   if (isLocalHost(host)) {
     XboxTransport *job;
@@ -389,12 +391,12 @@ Resource XboxServer::TaskStart(const String& msg, const String& reqInitDoc /* = 
   return Resource();
 }
 
-bool XboxServer::TaskStatus(CResRef task) {
+bool XboxServer::TaskStatus(const Resource& task) {
   XboxTask *ptask = task.getTyped<XboxTask>();
   return ptask->getJob()->isDone();
 }
 
-int XboxServer::TaskResult(CResRef task, int timeout_ms, Variant &ret) {
+int XboxServer::TaskResult(const Resource& task, int timeout_ms, Variant &ret) {
   XboxTask *ptask = task.getTyped<XboxTask>();
   return TaskResult(ptask->getJob(), timeout_ms, ret);
 }

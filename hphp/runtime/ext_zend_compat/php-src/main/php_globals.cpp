@@ -2,7 +2,7 @@
 // Zend has a very specific include order, so I can't do this class' header
 // before zend.h sadly
 #include "hphp/runtime/ext_zend_compat/php-src/main/php_globals.h"
-#include "hphp/runtime/ext_hhvm/ext_zend_compat.h"
+#include "hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.h"
 
 static IMPLEMENT_THREAD_LOCAL(_php_core_globals, s_php_core_globals);
 
@@ -57,10 +57,10 @@ char* PG_docref_ext() { return nullptr; }
 zend_bool PG_during_request_startup() { return false; }
 int64_t PG_log_errors_max_len() { return 1024; }
 const char* PG_last_error_message() {
-  return HPHP::g_context->getLastError()->data();
+  return HPHP::g_context->getLastError().data();
 }
 const char* PG_last_error_file() {
-  return HPHP::g_context->getLastErrorPath()->data();
+  return HPHP::g_context->getLastErrorPath().data();
 }
 int PG_last_error_type() { return HPHP::g_context->getLastErrorNumber(); }
 int PG_last_error_lineno() { return HPHP::g_context->getLastErrorLine(); }

@@ -20,6 +20,7 @@
 
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/ext/ext_file.h"
 #include "hphp/util/logger.h"
 
@@ -92,7 +93,9 @@ String debug_string_backtrace(bool skip, bool ignore_args /* = false */,
       buf.append("(");
       if (!ignore_args) {
         bool first = true;
-        for (ArrayIter it = frame->get(s_args).begin(); !it.end(); it.next()) {
+        for (ArrayIter it(frame->get(s_args).toArray());
+            !it.end();
+            it.next()) {
           if (!first) {
             buf.append(", ");
           } else {
@@ -166,7 +169,7 @@ bool f_error_log(const String& message, int message_type /* = 0 */,
   return false;
 }
 
-int64_t f_error_reporting(CVarRef level /* = null */) {
+int64_t f_error_reporting(const Variant& level /* = null */) {
   auto& id = ThreadInfo::s_threadInfo.getNoCheck()->m_reqInjectionData;
   int oldErrorReportingLevel = id.getErrorReportingLevel();
   if (!level.isNull()) {
@@ -185,12 +188,12 @@ bool f_restore_exception_handler() {
   return false;
 }
 
-Variant f_set_error_handler(CVarRef error_handler,
+Variant f_set_error_handler(const Variant& error_handler,
                             int error_types /* = k_E_ALL */) {
   return g_context->pushUserErrorHandler(error_handler, error_types);
 }
 
-Variant f_set_exception_handler(CVarRef exception_handler) {
+Variant f_set_exception_handler(const Variant& exception_handler) {
   return g_context->pushUserExceptionHandler(exception_handler);
 }
 
@@ -220,16 +223,17 @@ bool f_trigger_error(const String& error_msg,
   } else if (error_type == k_E_USER_WARNING) {
     g_context->handleError(msg, error_type, true,
                        ExecutionContext::ErrorThrowMode::Never,
-                       "HipHop Warning: ");
+                       "\nWarning: ");
   } else if (error_type == k_E_USER_NOTICE) {
     g_context->handleError(msg, error_type, true,
                        ExecutionContext::ErrorThrowMode::Never,
-                       "HipHop Notice: ");
+                       "\nNotice: ");
   } else if (error_type == k_E_USER_DEPRECATED) {
     g_context->handleError(msg, error_type, true,
                        ExecutionContext::ErrorThrowMode::Never,
                        "HipHop Deprecated: ");
   } else {
+    raise_warning("Invalid error type specified");
     return false;
   }
   return true;

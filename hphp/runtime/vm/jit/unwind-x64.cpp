@@ -25,7 +25,7 @@
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/runtime-type.h"
 #include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/vm/jit/translator-x64.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/member-operations.h"
@@ -74,14 +74,14 @@ void sync_regstate(_Unwind_Context* context) {
   fakeAr.m_savedRip = frameRip;
 
   Stats::inc(Stats::TC_SyncUnwind);
-  tx64->fixupMap().fixupWork(g_context.getNoCheck(), &fakeAr);
+  mcg->fixupMap().fixupWork(g_context.getNoCheck(), &fakeAr);
   tl_regState = VMRegState::CLEAN;
 }
 
 bool install_catch_trace(_Unwind_Context* ctx, _Unwind_Exception* exn,
                          InvalidSetMException* ism) {
   auto const rip = (TCA)_Unwind_GetIP(ctx);
-  auto catchTraceOpt = tx64->getCatchTrace(rip);
+  auto catchTraceOpt = mcg->getCatchTrace(rip);
   if (!catchTraceOpt) return false;
 
   auto catchTrace = *catchTraceOpt;
@@ -142,7 +142,8 @@ tc_unwind_personality(int version,
   // packed into a 64-bit int. For now we shouldn't be seeing exceptions from
   // any other runtimes but this may change in the future.
   DEBUG_ONLY constexpr uint64_t kMagicClass = 0x474e5543432b2b00;
-  assert(exceptionClass == kMagicClass);
+  DEBUG_ONLY constexpr uint64_t kMagicDependentClass = 0x474e5543432b2b01;
+  assert(exceptionClass == kMagicClass || exceptionClass == kMagicDependentClass);
   assert(version == 1);
 
   auto const& ti = typeInfoFromUnwindException(exceptionObj);

@@ -196,6 +196,12 @@ struct DispReg {
     assert(int(base) != -1 && "invalid register");
   }
 
+  // Constructor for baseless().
+  explicit DispReg(intptr_t disp)
+    : base(r64(RegNumber(-1)))
+    , disp(disp)
+  {}
+
   MemoryRef operator*() const;
   MemoryRef operator[](intptr_t) const;
 
@@ -348,6 +354,12 @@ inline RIPRelativeRef RegRIP::operator[](intptr_t disp) const {
   return *(*this + disp);
 }
 
+/*
+ * Used for the x64 addressing mode where there is a displacement but
+ * no base register.
+ */
+inline MemoryRef baseless(intptr_t disp) { return *(DispReg { disp }); }
+
 //////////////////////////////////////////////////////////////////////
 
 namespace reg {
@@ -447,9 +459,6 @@ namespace reg {
   constexpr RegXMM xmm13(13);
   constexpr RegXMM xmm14(14);
   constexpr RegXMM xmm15(15);
-
-  // rAsm is the symbolic name for a reg that is reserved for the assembler
-  constexpr Reg64  rAsm(r10);
 
 #define X(x) if (r == x) return "%"#x
   inline const char* regname(Reg64 r) {
@@ -818,39 +827,24 @@ public:
   /*
    * For when we a have a memory operand and the operand size is
    * 64-bits, only a 32-bit (sign-extended) immediate is supported.
-   * If the immediate is too big, we'll move it into rAsm first.
    */
 #define IMM64_STORE_OP(name, instr)             \
   void name##q(Immed i, MemoryRef m) {          \
-    if (i.fits(sz::dword)) {                    \
-      return instrIM(instr, i, m);              \
-    }                                           \
-    movq   (i, reg::rAsm);                      \
-    name##q(reg::rAsm, m);                      \
+    return instrIM(instr, i, m);                \
   }                                             \
                                                 \
   void name##q(Immed i, IndexedMemoryRef m) {   \
-    if (i.fits(sz::dword)) {                    \
-      return instrIM(instr, i, m);              \
-    }                                           \
-    movq   (i, reg::rAsm);                      \
-    name##q(reg::rAsm, m);                      \
+    return instrIM(instr, i, m);                \
   }
 
   /*
    * For instructions other than movq, even when the operand size is
-   * 64 bits only a 32-bit (sign-extended) immediate is supported.  We
-   * provide foo##q instructions that may emit multiple x64
-   * instructions (smashing rAsm) if the immediate does not
-   * actually fit in a long.
+   * 64 bits only a 32-bit (sign-extended) immediate is supported.
    */
 #define IMM64R_OP(name, instr)                  \
   void name##q(Immed imm, Reg64 r) {            \
-    if (imm.fits(sz::dword)) {                  \
-      return instrIR(instr, imm, r);            \
-    }                                           \
-    movq   (imm, reg::rAsm);                    \
-    name##q(reg::rAsm, r);                      \
+    always_assert(imm.fits(sz::dword));         \
+    return instrIR(instr, imm, r);              \
   }
 
 #define FULL_OP(name, instr)                    \
@@ -887,7 +881,7 @@ public:
 #undef BYTE_REG_OP
 
   // 64-bit immediates work with mov to a register.
-  void movq(Immed imm, Reg64 r) { instrIR(instr_mov, imm, r); }
+  void movq(Immed64 imm, Reg64 r) { instrIR(instr_mov, imm, r); }
 
   // movzbx is a special snowflake. We don't have movzbq because it behaves
   // exactly the same as movzbl but takes an extra byte.
@@ -916,11 +910,6 @@ public:
   void xchgb(Reg8 r1, Reg8 r2)   { instrRR(instr_xchgb, r1, r2); }
 
   void imul(Reg64 r1, Reg64 r2)  { instrRR(instr_imul, r1, r2); }
-
-  void imul(Immed im, Reg64 r1) {
-    movq(im, reg::rAsm);
-    imul(reg::rAsm, r1);
-  }
 
   void push(Reg64 r)  { instrR(instr_push, r); }
   void pushl(Reg32 r) { instrR(instr_push, r); }
@@ -973,13 +962,14 @@ public:
   void lddqu (IndexedMemoryRef m, RegXMM x) { instrMR(instr_lddqu, m, x); }
   void unpcklpd(RegXMM s, RegXMM d)         { instrRR(instr_unpcklpd, d, s); }
 
-  void shlq  (Immed i, Reg64 r) { instrIR(instr_shl, i.b(), r); }
-  void shrq  (Immed i, Reg64 r) { instrIR(instr_shr, i.b(), r); }
-  void sarq  (Immed i, Reg64 r) { instrIR(instr_sar, i.b(), r); }
-  void shll  (Immed i, Reg32 r) { instrIR(instr_shl, i.b(), r); }
-  void shrl  (Immed i, Reg32 r) { instrIR(instr_shr, i.b(), r); }
-  void shlw  (Immed i, Reg16 r) { instrIR(instr_shl, i.b(), r); }
-  void shrw  (Immed i, Reg16 r) { instrIR(instr_shr, i.b(), r); }
+  void rorq  (Immed i, Reg64 r) { instrIR(instr_ror, i, r); }
+  void shlq  (Immed i, Reg64 r) { instrIR(instr_shl, i, r); }
+  void shrq  (Immed i, Reg64 r) { instrIR(instr_shr, i, r); }
+  void sarq  (Immed i, Reg64 r) { instrIR(instr_sar, i, r); }
+  void shll  (Immed i, Reg32 r) { instrIR(instr_shl, i, r); }
+  void shrl  (Immed i, Reg32 r) { instrIR(instr_shr, i, r); }
+  void shlw  (Immed i, Reg16 r) { instrIR(instr_shl, i, r); }
+  void shrw  (Immed i, Reg16 r) { instrIR(instr_shr, i, r); }
 
   void shlq (Reg64 r) { instrR(instr_shl, r); }
   void sarq (Reg64 r) { instrR(instr_sar, r); }
@@ -1008,25 +998,13 @@ public:
 
   void jmp8(CodeAddress dest)  { emitJ8(instr_jmp, ssize_t(dest)); }
 
-  // May smash rAsm.
   void jmp(CodeAddress dest) {
-    always_assert(dest);
-    if (!jmpDeltaFits(dest)) {
-      movq (dest, reg::rAsm);
-      jmp  (reg::rAsm);
-      return;
-    }
+    always_assert(dest && jmpDeltaFits(dest));
     emitJ32(instr_jmp, ssize_t(dest));
   }
 
-  // May smash rAsm.
   void call(CodeAddress dest) {
-    always_assert(dest);
-    if (!jmpDeltaFits(dest)) {
-      movq (dest, reg::rAsm);
-      call (reg::rAsm);
-      return;
-    }
+    always_assert(dest && jmpDeltaFits(dest));
     emitJ32(instr_call, ssize_t(dest));
   }
 
@@ -1107,12 +1085,51 @@ public:
   CCS
 #undef CC
 
+  void psllq(Immed i, RegXMM r) { emitIR(instr_psllq, rn(r), i.b()); }
+  void psrlq(Immed i, RegXMM r) { emitIR(instr_psrlq, rn(r), i.b()); }
+
+  void movq_rx(Reg64 rSrc, RegXMM rdest) {
+    emitRR(instr_gpr2xmm, rn(rdest), rn(rSrc));
+  }
+  void movq_xr(RegXMM rSrc, Reg64 rdest) {
+    emitRR(instr_xmm2gpr, rn(rSrc), rn(rdest));
+  }
+
+  void addsd(RegXMM src, RegXMM srcdest) {
+    emitRR(instr_xmmadd, rn(srcdest), rn(src));
+  }
+  void mulsd(RegXMM src, RegXMM srcdest) {
+    emitRR(instr_xmmmul, rn(srcdest), rn(src));
+  }
+  void subsd(RegXMM src, RegXMM srcdest) {
+    emitRR(instr_xmmsub, rn(srcdest), rn(src));
+  }
+  void pxor(RegXMM src, RegXMM srcdest) {
+    emitRR(instr_pxor, rn(srcdest), rn(src));
+  }
+  void cvtsi2sd(Reg64 src, RegXMM dest) {
+    emitRR(instr_cvtsi2sd, rn(dest), rn(src));
+  }
+  void ucomisd(RegXMM l, RegXMM r) {
+    emitRR(instr_ucomisd, rn(l), rn(r));
+  }
+  void sqrtsd(RegXMM src, RegXMM dest) {
+    emitRR(instr_xmmsqrt, rn(dest), rn(src));
+  }
+
+  void divsd(RegXMM src, RegXMM srcdest) {
+    emitRR(instr_divsd, rn(srcdest), rn(src));
+  }
+  void cvttsd2siq(RegXMM src, Reg64 dest) {
+    emitRR(instr_cvttsd2si, rn(dest), rn(src));
+  }
+
   /*
    * The following utility functions do more than emit specific code.
    * (E.g. combine common idioms or patterns, smash code, etc.)
    */
 
-  void emitImmReg(Immed imm, Reg64 dest) {
+  void emitImmReg(Immed64 imm, Reg64 dest) {
     if (imm.q() == 0) {
       // Zeros the top bits also.
       xorl  (r32(rn(dest)), r32(rn(dest)));
@@ -1852,109 +1869,10 @@ public:
 
 public:
   /*
-   * The following functions are an older API to the assembler, which
-   * still partially exist here for backward compatibility.
-   *
-   * Our ordering convention follows the gas standard of "destination
-   * last": <op>_<src1>_<src2>_<dest>. Be warned that Intel manuals go the
-   * other way; in practice it's more important to be consistent with the
-   * tools (gdb, gas, inline asm, etc.) than the manuals, since you look at
-   * the former an order of magnitude more.
+   * The following functions use a naming convention for an older API
+   * to the assembler; conditional loads and moves haven't yet been
+   * ported.
    */
-
-  inline void mov_imm64_reg(int64_t imm, RegNumber rn) {
-    emitIR(instr_mov, rn, imm);
-  }
-
-  inline void mov_imm32_reg32(int32_t imm, RegNumber rn) {
-    emitIR(instr_mov, rn, imm, sz::dword);
-  }
-
-  inline void store_reg32_disp_reg64(RegNumber rsrc,
-                                     int off,
-                                     RegNumber rdest) {
-    emitRM32(instr_mov, rdest, reg::noreg, sz::byte, off, rsrc);
-  }
-
-  inline void load_reg64_disp_reg8(RegNumber rsrc, int off,
-                                   RegNumber rdest) {
-    emitMR8(instr_movb, rsrc, reg::noreg, sz::byte, off, rdest);
-  }
-
-  inline void load_reg64_disp_reg32(RegNumber rsrc, int off,
-                                    RegNumber rdest) {
-    emitMR32(instr_mov, rsrc, reg::noreg, sz::byte, off, rdest);
-  }
-
-  inline void load_disp32_reg64(int disp, RegNumber rdest) {
-    emitMR(instr_mov, reg::noreg, reg::noreg, sz::byte, disp, rdest);
-  }
-
-  inline void load_reg64_disp_index_reg32(RegNumber rsrc,
-                                          int disp,
-                                          RegNumber rindex,
-                                          RegNumber rdest) {
-    emitMR32(instr_mov, rsrc, rindex, sz::byte, disp, rdest);
-  }
-
-  inline void load_reg64_index_scale_disp_reg64(RegNumber rbase,
-                                                RegNumber rindex,
-                                                int scale, int disp,
-                                                RegNumber rdest) {
-    emitMR(instr_mov, rbase, rindex, scale, disp, rdest);
-  }
-
-  inline void load_reg64_index_scale_disp_reg32(RegNumber rbase,
-                                                RegNumber rindex,
-                                                int scale, int disp,
-                                                RegNumber rdest) {
-    emitMR32(instr_mov, rbase, rindex, scale, disp, rdest);
-  }
-
-  inline void store_imm8_disp_reg(int imm, int off, RegNumber rdest) {
-    emitIM8(instr_movb, rdest, reg::noreg, sz::byte, off, imm);
-  }
-
-  inline void store_imm32_disp_reg(int imm, int off, RegNumber rdest) {
-    emitIM32(instr_mov, rdest, reg::noreg, sz::byte, off, imm);
-  }
-
-  inline void mov_reg64_reg64(RegNumber rsrc, RegNumber rdest) {
-    emitRR(instr_mov, rsrc, rdest);
-  }
-
-  inline void mov_reg32_reg32(RegNumber rsrc, RegNumber rdest) {
-    emitRR32(instr_mov, rsrc, rdest);
-  }
-
-  inline void store_imm64_disp_reg64(int64_t imm, int off,
-                                     RegNumber rdest) {
-    if (deltaFits(imm, sz::dword)) {
-      emitIM(instr_mov, rdest, reg::noreg, sz::byte, off, imm);
-    } else {
-      mov_imm64_reg(imm, reg::rAsm);
-      emitRM(instr_mov, rdest, reg::noreg, sz::byte, off, reg::rAsm);
-    }
-  }
-  // mov %rsrc, disp(%rdest)
-  inline void store_reg64_disp_reg64(RegNumber rsrc, int off,
-                                     RegNumber rdest) {
-    emitRM(instr_mov, rdest, reg::noreg, sz::byte, off, rsrc);
-  }
-
-  // mov disp(%rsrc), %rdest
-  inline void load_reg64_disp_reg64(RegNumber rsrc, int off,
-                                    RegNumber rdest) {
-    emitMR(instr_mov, rsrc, reg::noreg, sz::byte, off, rdest);
-  }
-
-  // mov disp(%rsrc) + S*%rindex, %rdest
-  inline void load_reg64_disp_index_reg64(RegNumber rsrc,
-                                          int off,
-                                          RegNumber rindex,
-                                          RegNumber rdest) {
-    emitMR(instr_mov, rsrc, rindex, sz::qword, off, rdest);
-  }
 
   // CMOVcc [rbase + off], rdest
   inline void cload_reg64_disp_reg64(ConditionCode cc, RegNumber rbase,
@@ -1974,191 +1892,6 @@ public:
   inline void cmov_reg64_reg64(ConditionCode cc, RegNumber rsrc,
                                RegNumber rdest) {
     emitCRR(instr_cmovcc, cc, rsrc, rdest);
-  }
-
-  // lea disp(%rsrc), %rdest
-  inline void lea_reg64_disp_reg64(RegNumber rsrc, int off,
-                                   RegNumber rdest) {
-    emitMR(instr_lea, rsrc, reg::noreg, sz::byte, off, rdest);
-  }
-
-  /*
-   * Escaped opcodes for setcc family of instructions; always preceded with
-   * lock prefix/opcode escape byte 0x0f for these meanings. Generally if
-   * setX tests for condition foo, setX ^ 1 test for condition !foo.
-   *
-   * Some are aliases: "nge" is the same as "l", and "equal" and "zero" are
-   * treated the same on x86.
-   */
-
-#define SIMPLE_OP(name)                                                 \
-  /* op rsrc, rdest */                                                  \
-  inline void name ## _reg64_reg64(RegNumber rsrc,                \
-                                   RegNumber rdest) {             \
-    emitRR(instr_ ## name, rsrc, rdest);                                \
-  }                                                                     \
-  /* op esrc, edest */                                                  \
-  inline void name ## _reg32_reg32(RegNumber rsrc,                \
-                                   RegNumber rdest) {             \
-    emitRR32(instr_ ## name, rsrc, rdest);                              \
-  }                                                                     \
-  /* op imm32, rdest */                                                 \
-  inline void name ## _imm32_reg64(int64_t imm, RegNumber rdest) { \
-    emitIR(instr_ ## name, rdest, safe_cast<int32_t>(imm));             \
-  }                                                                     \
-  /* op imm32, edest */                                                 \
-  inline void name ## _imm32_reg32(int64_t imm, RegNumber rdest) { \
-    emitIR32(instr_ ## name, rdest, safe_cast<int32_t>(imm));           \
-  }                                                                     \
-  /* opl imm, disp(rdest) */                                            \
-  inline void name ## _imm32_disp_reg32(int64_t imm, int disp,          \
-                                        RegNumber rdest) {        \
-    emitIM32(instr_ ## name, rdest, reg::noreg,                         \
-             sz::byte, disp, safe_cast<int32_t>(imm));                  \
-  }                                                                     \
-  /* opq imm, disp(rdest) */                                            \
-  inline void name ## _imm64_disp_reg64(int64_t imm, int disp,          \
-                                        RegNumber rdest) {        \
-    emitIM(instr_ ## name, rdest, reg::noreg, sz::byte,                 \
-           disp, imm);                                                  \
-  }                                                                     \
-  /* opq rsrc, disp(rdest) */                                           \
-  inline void name ## _reg64_disp_reg64(RegNumber rsrc, int disp, \
-                                        RegNumber rdest) {        \
-    emitRM(instr_ ## name, rdest, reg::noreg,                           \
-           sz::byte, disp, rsrc);                                       \
-  }                                                                     \
-  /* opl esrc, disp(rdest) */                                           \
-  inline void name ## _reg32_disp_reg64(RegNumber rsrc, int disp, \
-                                        RegNumber rdest) {        \
-    emitRM32(instr_ ## name, rdest, reg::noreg, sz::byte, disp, rsrc);  \
-  }                                                                     \
-  /* opq disp(rsrc), rdest */                                           \
-  inline void name ## _disp_reg64_reg64(int disp, RegNumber rsrc, \
-                                        RegNumber rdest) {        \
-    emitMR(instr_ ## name, rsrc, reg::noreg, sz::byte, disp, rdest);    \
-  }                                                                     \
-  /* opl disp(esrc), edest */                                           \
-  inline void name ## _disp_reg64_reg32(int disp, RegNumber rsrc, \
-                                        RegNumber rdest) {        \
-    emitMR32(instr_ ## name, rsrc, reg::noreg, sz::byte, disp, rdest);  \
-  }
-
-#define SCALED_OP(name)                                                 \
-  SIMPLE_OP(name)                                                       \
-  JUST_SCALED_OP(name)
-#define JUST_SCALED_OP(name) \
-  /* opl rsrc, disp(rbase, rindex, scale), rdest */                     \
-  inline void name ## _reg64_reg64_index_scale_disp(RegNumber rsrc, \
-                      RegNumber rbase, RegNumber rindex,    \
-                      int scale, int disp) {                            \
-    emitRM(instr_ ## name, rbase, rindex, scale, disp, rsrc);           \
-  }                                                                     \
-  /* opl disp(rbase, rindex, scale), rdest */                           \
-  inline void name ## _reg64_index_scale_disp_reg64(RegNumber rbase, \
-                      RegNumber rindex, int scale, int disp,      \
-                      RegNumber rdest) {                          \
-    emitMR(instr_ ## name, rbase, rindex, scale, disp, rdest);          \
-  }                                                                     \
-  /* opq imm, disp(rdest, rindex, scale) */                             \
-  inline void name ## _imm64_index_scale_disp_reg64(                    \
-    int64_t imm, RegNumber rindex, int scale, int disp,             \
-    RegNumber rdest) {                                            \
-    emitIM(instr_ ## name, rdest, rindex, scale, disp, imm);             \
-  }
-
-  SCALED_OP(add)
-  SCALED_OP(xor)
-  SCALED_OP(sub)
-  SCALED_OP(and)
-  SCALED_OP(or)
-  SCALED_OP(test)
-  SCALED_OP(cmp)
-  JUST_SCALED_OP(lea)
-#undef SCALED_OP
-#undef SIMPLE_OP
-#undef JUST_SCALED_OP
-
-  // imul rsrc, rdest
-  inline void imul_reg64_reg64(RegNumber rsrc, RegNumber rdest) {
-    emitRR(instr_imul, rsrc, rdest);
-  }
-
-  // imul imm, rdest
-  inline void imul_imm64_reg64(int64_t imm, RegNumber rdest) {
-    mov_imm64_reg(imm, reg::rAsm);
-    imul_reg64_reg64(reg::rAsm, rdest);
-  }
-
-  inline void xchg_reg64_reg64(RegNumber rsrc, RegNumber rdest) {
-    emitRR(instr_xchg, rsrc, rdest);
-  }
-  inline void xchg_reg32_reg32(RegNumber rsrc, RegNumber rdest) {
-    emitRR32(instr_xchg, rsrc, rdest);
-  }
-
-  inline void mov_reg64_mmx(RegNumber rnsrc, RegNumber rndest) {
-    int rsrc = (int)rnsrc;
-    int rdst = (int)rndest;
-    // REX
-    unsigned char rex = 0x48;
-    if (rsrc & 8) rex |= 1;
-    byte(rex);
-    // two-byte opcode
-    byte(0x0F);
-    byte(0x6E);
-    emitModrm(3, rdst, rsrc);
-  }
-  inline void mov_mmx_reg64(RegNumber rnsrc, RegNumber rndest) {
-    int rsrc = (int)rnsrc;
-    int rdst = (int)rndest;
-    // REX
-    unsigned char rex = 0x48;
-    if (rdst & 8) rex |= 1;
-    byte(rex);
-    // two-byte opcode
-    byte(0x0F);
-    byte(0x7E);
-    emitModrm(3, rsrc, rdst);
-  }
-
-  void psllq(Immed i, RegXMM r) { emitIR(instr_psllq, rn(r), i.b()); }
-  void psrlq(Immed i, RegXMM r) { emitIR(instr_psrlq, rn(r), i.b()); }
-
-  void mov_reg64_xmm(RegNumber rSrc, RegXMM rdest) {
-    emitRR(instr_gpr2xmm, rn(rdest), rSrc);
-  }
-  void mov_xmm_reg64(RegXMM rSrc, RegNumber rdest) {
-    emitRR(instr_xmm2gpr, rn(rSrc), rdest);
-  }
-
-  void addsd_xmm_xmm(RegXMM src, RegXMM srcdest) {
-    emitRR(instr_xmmadd, rn(srcdest), rn(src));
-  }
-  void mulsd_xmm_xmm(RegXMM src, RegXMM srcdest) {
-    emitRR(instr_xmmmul, rn(srcdest), rn(src));
-  }
-  void subsd_xmm_xmm(RegXMM src, RegXMM srcdest) {
-    emitRR(instr_xmmsub, rn(srcdest), rn(src));
-  }
-  void pxor_xmm_xmm(RegXMM src, RegXMM srcdest) {
-    emitRR(instr_pxor, rn(srcdest), rn(src));
-  }
-  void cvtsi2sd_reg64_xmm(RegNumber src, RegXMM dest) {
-    emitRR(instr_cvtsi2sd, rn(dest), src);
-  }
-  void ucomisd_xmm_xmm(RegXMM l, RegXMM r) {
-    emitRR(instr_ucomisd, rn(l), rn(r));
-  }
-  void sqrtsd(RegXMM src, RegXMM dest) {
-    emitRR(instr_xmmsqrt, rn(dest), rn(src));
-  }
-
-  void divsd(RegXMM src, RegXMM srcdest) {
-    emitRR(instr_divsd, rn(srcdest), rn(src));
-  }
-  void cvttsd2siq(RegXMM src, Reg64 dest) {
-    emitRR(instr_cvttsd2si, rn(dest), rn(src));
   }
 
 private:
@@ -2344,6 +2077,9 @@ private:
                Reg64 r)            { emitMR(op, URIP(m), rn(r),
                                             sz::qword, true); }
 
+  void instrIR(X64Instr op, Immed64 i, Reg64 r) {
+    emitIR(op, rn(r), i.q());
+  }
   void instrIR(X64Instr op, Immed i, Reg64 r) {
     emitIR(op, rn(r), i.q());
   }
@@ -2508,16 +2244,6 @@ inline void X64Assembler::call(Label& l) { l.call(*this); }
 #undef CC
 
 //////////////////////////////////////////////////////////////////////
-
-class StoreImmPatcher {
- public:
-  StoreImmPatcher(CodeBlock& cb, uint64_t initial, RegNumber reg,
-                  int32_t offset, RegNumber base);
-  void patch(uint64_t actual);
- private:
-  CodeAddress m_addr;
-  bool m_is32;
-};
 
 /*
  * Select the assembler which contains a given address.

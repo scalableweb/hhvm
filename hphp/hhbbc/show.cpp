@@ -166,18 +166,10 @@ std::string show(const Func& func) {
 
 #define X(what) if (func.what) folly::toAppend(#what "\n", &ret)
   X(isClosureBody);
-  X(isGeneratorFromClosure);
-  X(isPairGenerator);
-  X(isGeneratorBody);
   X(isAsync);
+  X(isGenerator);
+  X(isPairGenerator);
 #undef X
-
-  if (auto const f = func.innerGeneratorFunc) {
-    ret += folly::format("innerGeneratorFunc: {}\n", f->name->data()).str();
-  }
-  if (auto const f = func.outerGeneratorFunc) {
-    ret += folly::format("outerGeneratorFunc: {}\n", f->name->data()).str();
-  }
 
   ret += folly::format("digraph {} {{\n  node [shape=box];\n{}}}\n",
     func.name->data(), indent(2, dot_cfg(func))).str();
@@ -437,6 +429,12 @@ std::string show(Type t) {
   case BCStr:        ret = "CStr";     break;
   case BSArr:        ret = "SArr";     break;
   case BCArr:        ret = "CArr";     break;
+  case BSArrE:       ret = "SArrE";    break;
+  case BCArrE:       ret = "CArrE";    break;
+  case BSArrN:       ret = "SArrN";    break;
+  case BCArrN:       ret = "CArrN";    break;
+  case BArrE:        ret = "ArrE";     break;
+  case BArrN:        ret = "ArrN";     break;
   case BObj:         ret = "Obj";      break;
   case BRes:         ret = "Res";      break;
   case BCls:         ret = "Cls";      break;
@@ -457,8 +455,14 @@ std::string show(Type t) {
   case BOptSStr:     ret = "?SStr";    break;
   case BOptCStr:     ret = "?CStr";    break;
   case BOptStr:      ret = "?Str";     break;
+  case BOptSArrE:    ret = "?SArrE";   break;
+  case BOptCArrE:    ret = "?CArrE";   break;
+  case BOptSArrN:    ret = "?SArrN";   break;
+  case BOptCArrN:    ret = "?CArrN";   break;
   case BOptSArr:     ret = "?SArr";    break;
   case BOptCArr:     ret = "?CArr";    break;
+  case BOptArrE:     ret = "?ArrE";    break;
+  case BOptArrN:     ret = "?ArrN";    break;
   case BOptArr:      ret = "?Arr";     break;
   case BOptObj:      ret = "?Obj";     break;
   case BOptRes:      ret = "?Res";     break;
@@ -484,8 +488,10 @@ std::string show(Type t) {
   case DataTag::ArrStruct:
   case DataTag::ArrMapN:
     break;
-  case DataTag::Str:
   case DataTag::ArrVal:
+    folly::toAppend("~", &ret);
+    break;
+  case DataTag::Str:
   case DataTag::Int:
   case DataTag::Dbl:
     folly::toAppend("=", &ret);
